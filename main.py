@@ -24,6 +24,7 @@ from config import (
     is_owner,
     update_stats,
     restore_from_telegram,
+    restore_from_file,
     backup_to_telegram,
 )
 from handlers import (
@@ -135,6 +136,46 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("✅ تم حفظ الباكب في Telegram بنجاح!")
     else:
         await msg.edit_text("❌ فشل حفظ الباكب، تحقق من اللوج")
+
+
+async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /restore — يطلب من المالك إرسال ملف الباكب.
+    لو أُرسل مع ملف JSON مباشرة يستعيد منه.
+    """
+    if not is_owner(update.effective_user.id):
+        return
+
+    # لو الرسالة نفسها فيها ملف (أرسل /restore مع document)
+    if update.message.document:
+        doc = update.message.document
+        if doc.file_name and doc.file_name.endswith(".json"):
+            msg = await update.message.reply_text("⏳ جاري استعادة البيانات...")
+            ok  = await restore_from_file(context.bot, doc)
+            if ok:
+                await msg.edit_text(
+                    f"✅ **تم استعادة البيانات بنجاح!**\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👥 المستخدمين: **{len(data['users'])}**\n"
+                    f"🚫 المحظورين: **{len(data['banned'])}**\n"
+                    f"⭐ VIP: **{len(data['vip_users'])}**",
+                    parse_mode="Markdown"
+                )
+            else:
+                await msg.edit_text("❌ فشل تحميل الملف، تأكد إنه ملف JSON صحيح")
+        else:
+            await update.message.reply_text("❌ أرسل ملف `.json` فقط")
+        return
+
+    # مفيش ملف — اطلب منه يبعت
+    context.user_data["waiting_restore"] = True
+    await update.message.reply_text(
+        "📂 **استعادة الباكب**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "أرسل ملف `bot_data.json` الموجود في محادثتك مع البوت\n\n"
+        "💡 ابحث في المحادثة دي عن رسالة فيها ملف `bot_data.json` وأعد إرساله هنا",
+        parse_mode="Markdown"
+    )
 
 
 async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -280,16 +321,17 @@ async def post_init(application: Application):
         BotCommand('help', '📖 المساعدة'),
     ]
     owner_cmds = user_cmds + [
-        BotCommand('stats',  '📊 الإحصائيات'),
-        BotCommand('ping',   '🏓 فحص البوت'),
-        BotCommand('backup', '💾 حفظ باكب'),
-        BotCommand('users',  '👥 آخر المستخدمين'),
-        BotCommand('info',   'ℹ️ معلومات مستخدم'),
-        BotCommand('send',   '✉️ إرسال رسالة'),
-        BotCommand('bc',     '📣 إذاعة'),
-        BotCommand('ban',    '🚫 حظر'),
-        BotCommand('unban',  '✅ فك حظر'),
-        BotCommand('vip',    '⭐ إضافة VIP'),
+        BotCommand('stats',   '📊 الإحصائيات'),
+        BotCommand('ping',    '🏓 فحص البوت'),
+        BotCommand('backup',  '💾 حفظ باكب'),
+        BotCommand('restore', '📂 استعادة باكب'),
+        BotCommand('users',   '👥 آخر المستخدمين'),
+        BotCommand('info',    'ℹ️ معلومات مستخدم'),
+        BotCommand('send',    '✉️ إرسال رسالة'),
+        BotCommand('bc',      '📣 إذاعة'),
+        BotCommand('ban',     '🚫 حظر'),
+        BotCommand('unban',   '✅ فك حظر'),
+        BotCommand('vip',     '⭐ إضافة VIP'),
     ]
     try:
         await application.bot.set_my_commands(user_cmds, scope=BotCommandScopeDefault())
@@ -315,6 +357,36 @@ async def post_init(application: Application):
         )
     except Exception as e:
         logger.error("❌ فشل إرسال الإشعار: %s", e)
+
+async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يستقبل ملف JSON بعد أمر /restore."""
+    if not update.message or not update.message.document:
+        return
+    if not is_owner(update.effective_user.id):
+        return
+    if not context.user_data.get("waiting_restore"):
+        return
+
+    doc = update.message.document
+    if not (doc.file_name and doc.file_name.endswith(".json")):
+        await update.message.reply_text("❌ أرسل ملف `.json` فقط")
+        return
+
+    context.user_data.pop("waiting_restore", None)
+    msg = await update.message.reply_text("⏳ جاري استعادة البيانات...")
+    ok  = await restore_from_file(context.bot, doc)
+    if ok:
+        await msg.edit_text(
+            f"✅ **تم استعادة البيانات بنجاح!**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👥 المستخدمين: **{len(data['users'])}**\n"
+            f"🚫 المحظورين: **{len(data['banned'])}**\n"
+            f"⭐ VIP: **{len(data['vip_users'])}**",
+            parse_mode="Markdown"
+        )
+    else:
+        await msg.edit_text("❌ فشل تحميل الملف، تأكد إنه ملف JSON صحيح")
+
 
 # ═══════════════════════════════════════════════════════════════
 #                      🚀 التشغيل الرئيسي
@@ -344,18 +416,19 @@ def main():
 
     # ── الأوامر ──
     commands = {
-        "start":  start_command,
-        "help":   help_command,
-        "stats":  stats_command,
-        "ping":   ping_command,
-        "backup": backup_command,
-        "ban":    ban_command,
-        "unban":  unban_command,
-        "vip":    vip_command,
-        "send":   send_command,
-        "info":   info_command,
-        "users":  users_command,
-        "bc":     bc_command,
+        "start":   start_command,
+        "help":    help_command,
+        "stats":   stats_command,
+        "ping":    ping_command,
+        "backup":  backup_command,
+        "restore": restore_command,
+        "ban":     ban_command,
+        "unban":   unban_command,
+        "vip":     vip_command,
+        "send":    send_command,
+        "info":    info_command,
+        "users":   users_command,
+        "bc":      bc_command,
     }
     for name, fn in commands.items():
         application.add_handler(CommandHandler(name, fn))
@@ -364,6 +437,11 @@ def main():
     application.add_handler(
         ChatMemberHandler(my_chat_member_handler, ChatMemberHandler.MY_CHAT_MEMBER)
     )
+    # معالج ملفات JSON للـ restore (أولوية عالية)
+    application.add_handler(MessageHandler(
+        filters.Document.MimeType("application/json") & filters.ChatType.PRIVATE,
+        document_handler
+    ), group=0)
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, message_handler))
     application.add_error_handler(error_handler)
 

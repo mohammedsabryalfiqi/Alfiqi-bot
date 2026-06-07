@@ -89,57 +89,31 @@ def save_data() -> bool:
 data = load_data()
 
 # ═══════════════════════════════════════════════════════════════
-#               ☁️ Telegram Backup - تحميل عند البدء
+#               ☁️ Telegram Backup - استعادة عبر /restore
 # ═══════════════════════════════════════════════════════════════
 
 async def restore_from_telegram(bot) -> bool:
-    """
-    عند بدء التشغيل: يجيب آخر باكب من Telegram ويحمّله.
-    """
-    global data
-    try:
-        # نجيب آخر رسالة في الـ BACKUP_CHAT تبدأ بـ #BACKUP
-        updates = await bot.get_updates(limit=1, timeout=5)
-        # نبحث في الـ chat عن رسالة الباكب
-        async for msg in _search_backup(bot):
-            if msg:
-                raw = msg.text or (msg.document and await _download_doc(bot, msg))
-                if raw:
-                    loaded = json.loads(raw)
-                    data.update(_merge_defaults(loaded))
-                    save_data()
-                    print("✅ تم استعادة البيانات من Telegram")
-                    return True
-    except Exception as e:
-        print(f"⚠️ لم يتم استعادة الباكب: {e}")
+    """stub — الاستعادة تتم عبر /restore في main.py"""
     return False
 
 
-async def _search_backup(bot):
-    """يبحث عن رسالة الباكب في الـ chat."""
+async def restore_from_file(bot, document) -> bool:
+    """
+    يستعيد البيانات من ملف JSON أرسله المالك عبر /restore.
+    يُستدعى من main.py عند استقبال الملف.
+    """
+    global data
     try:
-        msg_id = data.get("_backup_message_id")
-        if msg_id:
-            msg = await bot.forward_message(
-                chat_id=BACKUP_CHAT,
-                from_chat_id=BACKUP_CHAT,
-                message_id=msg_id,
-            )
-            yield msg
-            return
-    except Exception:
-        pass
-    yield None
-
-
-async def _download_doc(bot, msg) -> str:
-    """يحمّل محتوى document من رسالة Telegram."""
-    try:
-        file = await bot.get_file(msg.document.file_id)
+        file    = await bot.get_file(document.file_id)
         content = await file.download_as_bytearray()
-        return content.decode("utf-8")
-    except Exception:
-        return ""
+        loaded  = json.loads(content.decode("utf-8"))
+        data.update(_merge_defaults(loaded))
+        save_data()
+        print("✅ تم استعادة البيانات من ملف JSON")
+        return True
+    except Exception as e:
+        print(f"❌ فشل استعادة الباكب: {e}")
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════
