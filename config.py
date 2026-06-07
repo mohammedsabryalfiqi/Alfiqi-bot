@@ -1,17 +1,20 @@
 # config.py
-# ⚙️ الإعدادات + البيانات + الدوال المساعدة - V6.0 (MongoDB)
+# ⚙️ الإعدادات + البيانات + الدوال المساعدة - V7.0 (Telegram Backup)
 
 import os
 import json
+import asyncio
 from datetime import datetime
 
 # ═══════════════════════════════════════════════════════════════
 #                    🔐 المتغيرات السرية
 # ═══════════════════════════════════════════════════════════════
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-OWNER_ID  = int(os.environ.get("OWNER_ID", "0"))
-MONGO_URL = os.environ.get("MONGO_URL", "")   # ← متغير جديد في Railway
+BOT_TOKEN   = os.environ.get("BOT_TOKEN", "")
+OWNER_ID    = int(os.environ.get("OWNER_ID", "0"))
+BACKUP_CHAT = int(os.environ.get("BACKUP_CHAT", "5231453921"))
+
+DATA_FILE = "/tmp/bot_data.json"   # مؤقت – البيانات الحقيقية في Telegram
 
 # ═══════════════════════════════════════════════════════════════
 #                      💾 البيانات الافتراضية
@@ -44,40 +47,14 @@ DEFAULT_DATA = {
         "today_sent":     0,
         "today_date":     "",
     },
+    "_backup_message_id": None,   # ID رسالة الباكب في Telegram
 }
 
 # ═══════════════════════════════════════════════════════════════
-#               💾 طبقة التخزين (MongoDB أو JSON كاحتياط)
-# ═══════════════════════════════════════════════════════════════
-
-# --- محاولة الاتصال بـ MongoDB ---
-_mongo_col = None
-if MONGO_URL:
-    try:
-        from pymongo import MongoClient
-        import ssl
-_client = MongoClient(
-    MONGO_URL,
-    serverSelectionTimeoutMS=5000,
-    tls=True,
-    tlsAllowInvalidCertificates=True,
-)
-        _client.server_info()          # اختبار الاتصال فوراً
-        _mongo_col = _client["bot_db"]["data"]
-        print("✅ MongoDB متصل بنجاح")
-    except Exception as _e:
-        print(f"⚠️ فشل الاتصال بـ MongoDB: {_e}")
-        print("⚠️ سيتم الاحتياط إلى ملف JSON محلي")
-        _mongo_col = None
-else:
-    print("⚠️ MONGO_URL غير موجود – سيتم استخدام ملف JSON محلي")
-
-DATA_FILE = os.environ.get("DATA_FILE", "bot_data.json")
-
+#               💾 تحميل وحفظ البيانات (ملف مؤقت)
 # ═══════════════════════════════════════════════════════════════
 
 def _merge_defaults(loaded: dict) -> dict:
-    """يضيف أي مفاتيح ناقصة من DEFAULT_DATA."""
     for key, val in DEFAULT_DATA.items():
         if key not in loaded:
             loaded[key] = val.copy() if isinstance(val, (dict, list)) else val
@@ -88,57 +65,134 @@ def _merge_defaults(loaded: dict) -> dict:
 
 
 def load_data() -> dict:
-    """تحميل البيانات – MongoDB أولاً، ثم JSON كاحتياط."""
-    # --- MongoDB ---
-    if _mongo_col is not None:
-        try:
-            doc = _mongo_col.find_one({"_id": "main"})
-            if doc:
-                doc.pop("_id", None)
-                return _merge_defaults(doc)
-            # أول تشغيل – لا يوجد مستند بعد
-            return json.loads(json.dumps(DEFAULT_DATA))
-        except Exception as e:
-            print(f"❌ خطأ في تحميل MongoDB: {e}")
-
-    # --- JSON احتياطي ---
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 return _merge_defaults(json.load(f))
     except Exception as e:
-        print(f"❌ خطأ في تحميل JSON: {e}")
-
+        print(f"❌ خطأ في تحميل البيانات المحلية: {e}")
     return json.loads(json.dumps(DEFAULT_DATA))
 
 
 def save_data() -> bool:
-    """حفظ البيانات – MongoDB أولاً، ثم JSON كاحتياط."""
-    # --- MongoDB ---
-    if _mongo_col is not None:
-        try:
-            _mongo_col.replace_one(
-                {"_id": "main"},
-                {"_id": "main", **data},
-                upsert=True,
-            )
-            return True
-        except Exception as e:
-            print(f"❌ خطأ في حفظ MongoDB: {e}")
-            # لا نرجع False مباشرة – نجرب JSON كاحتياط
-
-    # --- JSON احتياطي ---
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         return True
     except Exception as e:
-        print(f"❌ خطأ في حفظ JSON: {e}")
+        print(f"❌ خطأ في حفظ البيانات المحلية: {e}")
         return False
 
 
 # المتغير العام للبيانات
 data = load_data()
+
+# ═══════════════════════════════════════════════════════════════
+#               ☁️ Telegram Backup - تحميل عند البدء
+# ═══════════════════════════════════════════════════════════════
+
+async def restore_from_telegram(bot) -> bool:
+    """
+    عند بدء التشغيل: يجيب آخر باكب من Telegram ويحمّله.
+    """
+    global data
+    try:
+        # نجيب آخر رسالة في الـ BACKUP_CHAT تبدأ بـ #BACKUP
+        updates = await bot.get_updates(limit=1, timeout=5)
+        # نبحث في الـ chat عن رسالة الباكب
+        async for msg in _search_backup(bot):
+            if msg:
+                raw = msg.text or (msg.document and await _download_doc(bot, msg))
+                if raw:
+                    loaded = json.loads(raw)
+                    data.update(_merge_defaults(loaded))
+                    save_data()
+                    print("✅ تم استعادة البيانات من Telegram")
+                    return True
+    except Exception as e:
+        print(f"⚠️ لم يتم استعادة الباكب: {e}")
+    return False
+
+
+async def _search_backup(bot):
+    """يبحث عن رسالة الباكب في الـ chat."""
+    try:
+        msg_id = data.get("_backup_message_id")
+        if msg_id:
+            msg = await bot.forward_message(
+                chat_id=BACKUP_CHAT,
+                from_chat_id=BACKUP_CHAT,
+                message_id=msg_id,
+            )
+            yield msg
+            return
+    except Exception:
+        pass
+    yield None
+
+
+async def _download_doc(bot, msg) -> str:
+    """يحمّل محتوى document من رسالة Telegram."""
+    try:
+        file = await bot.get_file(msg.document.file_id)
+        content = await file.download_as_bytearray()
+        return content.decode("utf-8")
+    except Exception:
+        return ""
+
+
+# ═══════════════════════════════════════════════════════════════
+#               ☁️ Telegram Backup - حفظ دوري
+# ═══════════════════════════════════════════════════════════════
+
+async def backup_to_telegram(bot) -> bool:
+    """
+    يرسل البيانات كاملة كملف JSON إلى BACKUP_CHAT.
+    يُحدّث رسالة الباكب القديمة أو يرسل رسالة جديدة.
+    """
+    global data
+    try:
+        import io
+        content = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        file_obj = io.BytesIO(content)
+        file_obj.name = "bot_data.json"
+
+        msg_id = data.get("_backup_message_id")
+
+        # نحذف الرسالة القديمة لو موجودة
+        if msg_id:
+            try:
+                await bot.delete_message(chat_id=BACKUP_CHAT, message_id=msg_id)
+            except Exception:
+                pass
+
+        # نبعت الملف الجديد
+        sent = await bot.send_document(
+            chat_id=BACKUP_CHAT,
+            document=file_obj,
+            caption=f"🔒 #BACKUP\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        )
+        data["_backup_message_id"] = sent.message_id
+        save_data()
+        print(f"✅ تم حفظ الباكب في Telegram (msg_id={sent.message_id})")
+        return True
+    except Exception as e:
+        print(f"❌ خطأ في الباكب: {e}")
+        return False
+
+
+def save_data_and_schedule_backup(bot=None) -> bool:
+    """يحفظ محلياً + يجدول باكب Telegram."""
+    result = save_data()
+    if bot:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(backup_to_telegram(bot))
+        except Exception:
+            pass
+    return result
+
 
 # ═══════════════════════════════════════════════════════════════
 #                      🔧 دوال مساعدة
@@ -201,8 +255,8 @@ def update_stats(stat_type: str) -> None:
         stats["total_received"] += 1
         stats["today_received"] += 1
     elif stat_type == "sent":
-        stats["total_sent"]  += 1
-        stats["today_sent"]  += 1
+        stats["total_sent"] += 1
+        stats["today_sent"] += 1
     save_data()
 
 
@@ -224,13 +278,7 @@ def get_smart_reply(text: str):
 # ═══════════════════════════════════════════════════════════════
 
 print("=" * 50)
-print("✅ تم تحميل config.py  (V6 – MongoDB)")
-print(f"👑 OWNER_ID = {OWNER_ID}")
-print(f"💾 وضع التخزين: {'MongoDB ☁️' if _mongo_col is not None else 'JSON محلي ⚠️'}")
-if OWNER_ID == 0:
-    print("⚠️ تحذير: OWNER_ID غير مضبوط! ضعه في متغيرات البيئة.")
-if not BOT_TOKEN:
-    print("⚠️ تحذير: BOT_TOKEN غير مضبوط! ضعه في متغيرات البيئة.")
-if not MONGO_URL:
-    print("⚠️ تحذير: MONGO_URL غير مضبوط! البيانات ستُمسح عند كل restart.")
+print("✅ تم تحميل config.py  (V7 – Telegram Backup)")
+print(f"👑 OWNER_ID    = {OWNER_ID}")
+print(f"💾 BACKUP_CHAT = {BACKUP_CHAT}")
 print("=" * 50)
