@@ -127,9 +127,10 @@ def msg_settings_menu():
             btn("🖼 صورة الواجهة", "set_welcome_media", "primary"),
             btn("🗑 حذف الصورة",   "clear_welcome_media", "danger"),
         ],
-        [btn("⏰ رسالة الغياب",  "edit_away",     "primary")],
-        [btn("✅ رسالة الاستلام", "edit_received", "primary")],
-        [btn("🔙 رجوع",           "settings",      "primary")],
+        [btn("⏰ رسالة الغياب",      "edit_away",           "primary")],
+        [btn("✅ رسالة الاستلام",    "edit_received",       "primary")],
+        [btn("🔓 رسالة العودة بعد الحظر", "edit_returned_block", "primary")],
+        [btn("🔙 رجوع",              "settings",            "primary")],
     ])
 
 def away_menu():

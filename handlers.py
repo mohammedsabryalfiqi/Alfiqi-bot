@@ -149,6 +149,9 @@ async def notify_owner(bot, user, event: str):
     elif event == "blocked_bot":
         icon  = "🚫"
         title = "مستخدم حظر البوت"
+    elif event == "returned_after_block":
+        icon  = "🔓"
+        title = "مستخدم رفع الحظر وعاد للبوت"
     else:
         return
 
@@ -221,6 +224,28 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     event = "new_user" if is_new else "returned_user"
     await notify_owner(context.bot, user, event)
 
+    # ── رسالة ترحيب خاصة لمن حظل البوت ورجع ──
+    uid = str(user.id)
+    previously_blocked = data["users"].get(uid, {}).get("blocked_bot") is False and \
+                         data["users"].get(uid, {}).get("returned_bot_time")
+
+    if previously_blocked:
+        welcome = data["messages"].get(
+            "returned_after_block",
+            "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
+        ).replace("{name}", user.first_name or "عزيزي")
+
+    if previously_blocked:
+        welcome = data["messages"].get(
+            "returned_after_block",
+            "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
+        ).replace("{name}", user.first_name or "عزيزي")
+        await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN)
+        if data["status"]["is_away"]:
+            await asyncio.sleep(1)
+            await update.message.reply_text(data["messages"]["away"])
+        return
+
     # مستخدم عادي
     welcome = data["messages"]["welcome"].replace("{name}", user.first_name or "عزيزي")
     if is_vip(user.id):
@@ -276,8 +301,19 @@ async def my_chat_member_handler(update: Update, context: ContextTypes.DEFAULT_T
         uid = str(user.id)
         save_user(user)
         if uid in data["users"]:
-            data["users"][uid]["blocked_bot"] = True
+            data["users"][uid]["blocked_bot"]      = True
+            data["users"][uid]["blocked_bot_time"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             save_data()
+
+    elif new_status == "member":
+        # فتح البوت من جديد بعد الحظر
+        uid = str(user.id)
+        if data["users"].get(uid, {}).get("blocked_bot"):
+            # مسح علامة الحظر
+            data["users"][uid]["blocked_bot"]       = False
+            data["users"][uid]["returned_bot_time"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            save_data()
+            await notify_owner(context.bot, user, "returned_after_block")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -515,6 +551,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["waiting"] = "edit_received"
         await query.edit_message_text(
             f"✏️ **رسالة الاستلام الحالية:**\n\n{data['messages']['received']}\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n📝 أرسل الرسالة الجديدة:",
+            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if cb == "edit_returned_block":
+        if not is_owner(user.id): return
+        context.user_data["waiting"] = "edit_returned_block"
+        current = data["messages"].get("returned_after_block", "عوداً حميداً {name} 😊")
+        await query.edit_message_text(
+            f"✏️ **رسالة العودة بعد الحظر الحالية:**\n\n{current}\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n📝 أرسل الرسالة الجديدة\n💡 استخدم {{name}} لاسم المستخدم",
             reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
         return
 
@@ -969,6 +1014,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["messages"]["received"] = msg.text
         save_data(); context.user_data.clear()
         await msg.reply_text("✅ تم حفظ رسالة الاستلام!", reply_markup=back_btn("msg_settings"))
+        return
+
+    if waiting == "edit_returned_block" and msg.text:
+        data["messages"]["returned_after_block"] = msg.text
+        save_data(); context.user_data.clear()
+        await msg.reply_text("✅ تم حفظ رسالة العودة بعد الحظر!", reply_markup=back_btn("msg_settings"))
         return
 
     if waiting == "sr_trigger" and msg.text:
