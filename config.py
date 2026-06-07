@@ -55,7 +55,13 @@ _mongo_col = None
 if MONGO_URL:
     try:
         from pymongo import MongoClient
-        _client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+        import ssl
+_client = MongoClient(
+    MONGO_URL,
+    serverSelectionTimeoutMS=5000,
+    tls=True,
+    tlsAllowInvalidCertificates=True,
+)
         _client.server_info()          # اختبار الاتصال فوراً
         _mongo_col = _client["bot_db"]["data"]
         print("✅ MongoDB متصل بنجاح")
