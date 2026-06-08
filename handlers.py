@@ -340,10 +340,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media_file_id = welcome_media.get("file_id")
     media_type    = welcome_media.get("type")  # "photo" أو "sticker"
 
+    # الكيبورد الدائم — يُرسل مع رسالة الترحيب مباشرةً
+    kb = persistent_kb()
+    has_kb = bool(data.get("persistent_buttons"))
+
     from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-    view_btn = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
-    ]])
+    # لو في أزرار دائمة → لا نُظهر زر "أرسل رسالتك" لأن الكيبورد يكفي
+    if has_kb:
+        welcome_markup = kb
+    else:
+        welcome_markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
+        ]])
 
     clean_welcome, welcome_entities = render_custom_emoji_message(welcome)
     if media_file_id and media_type == "photo":
@@ -352,28 +360,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo=media_file_id,
                 caption=clean_welcome,
                 caption_entities=welcome_entities,
-                reply_markup=view_btn
+                reply_markup=welcome_markup
             )
         else:
             await update.message.reply_photo(
                 photo=media_file_id,
                 caption=welcome,
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=view_btn
+                reply_markup=welcome_markup
             )
     elif media_file_id and media_type == "sticker":
         await update.message.reply_sticker(sticker=media_file_id)
-        await send_with_custom_emoji(update.message, welcome, reply_markup=view_btn)
+        await send_with_custom_emoji(update.message, welcome, reply_markup=welcome_markup)
     else:
-        await send_with_custom_emoji(update.message, welcome, reply_markup=view_btn)
-
-    # 🟢 الأزرار الدائمة للمستخدم
-    try:
-        kb = persistent_kb()
-        if data.get("persistent_buttons"):
-            await update.message.reply_text("⬇️ القائمة:", reply_markup=kb)
-    except Exception as _e:
-        print(f"persistent_kb error: {_e}")
+        await send_with_custom_emoji(update.message, welcome, reply_markup=welcome_markup)
 
     # رسالة الغياب
     if data["status"]["is_away"]:
@@ -657,7 +657,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cb == "start_chat":
         await query.answer()
         kb = persistent_kb()
-        if data.get("persistent_buttons"):
+        has_kb = bool(data.get("persistent_buttons"))
+        if has_kb:
             await query.message.reply_text("📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً ", reply_markup=kb)
         else:
             await query.message.reply_text("📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً ")
@@ -1198,10 +1199,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
     if waiting == "pbtn_text_label" and msg.text:
-        context.user_data["pbtn_label"] = msg.text.strip()[:30]
+        context.user_data["pbtn_label"] = msg.text.strip()[:50]
         context.user_data["waiting"] = "pbtn_text_value"
         await msg.reply_text(
-            f"✅ الاسم: **{msg.text.strip()[:30]}**\n\n📝 الآن أرسل **النص** اللي هيرد على المستخدم:",
+            f"✅ الاسم: **{msg.text.strip()[:50]}**\n\n"
+            f"📝 الآن أرسل **النص** اللي هيرد على المستخدم:\n"
+            f"💡 يمكنك استخدام `{{EMOJI_ID}}` لإيموجي بريميوم",
             reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -1213,16 +1216,18 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         save_data(); context.user_data.clear()
         await msg.reply_text(
-            f"✅ تم إضافة الزر **{label}**\n\nاطلب من المستخدم /start علشان يظهر له.",
+            f"✅ تم إضافة الزر **{label}**",
             reply_markup=back_btn("pbuttons"), parse_mode=ParseMode.MARKDOWN,
         )
         return
 
     if waiting == "pbtn_url_label" and msg.text:
-        context.user_data["pbtn_label"] = msg.text.strip()[:30]
+        context.user_data["pbtn_label"] = msg.text.strip()[:50]
         context.user_data["waiting"] = "pbtn_url_value"
         await msg.reply_text(
-            f"✅ الاسم: **{msg.text.strip()[:30]}**\n\n🔗 الآن أرسل **الرابط** (لازم يبدأ بـ https://):",
+            f"✅ الاسم: **{msg.text.strip()[:50]}**\n\n"
+            f"🔗 الآن أرسل **الرابط** (لازم يبدأ بـ https://):\n"
+            f"💡 يمكنك استخدام `{{EMOJI_ID}}` في الاسم",
             reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN,
         )
         return

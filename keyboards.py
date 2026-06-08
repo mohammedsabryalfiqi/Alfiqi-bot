@@ -1,12 +1,48 @@
 # keyboards.py
 # 🎛️ ملف الأزرار والقوائم - V5.0 (زر بطاقة المستخدم)
 
+import re as _re
 from telegram import (
     InlineKeyboardButton, InlineKeyboardMarkup,
     ReplyKeyboardMarkup, KeyboardButton, WebAppInfo,
-    ReplyKeyboardRemove,
+    ReplyKeyboardRemove, MessageEntity,
 )
+from telegram.constants import MessageEntityType
 from utils import data
+
+
+# ═══════════════════════════════════════════════════════════════
+#    🎨 دالة مساعدة: تحويل {EMOJI_ID} في label الزر
+# ═══════════════════════════════════════════════════════════════
+
+_EMOJI_PLACEHOLDER = "\U0001F4A0"   # 💠  placeholder مرئي بحجم إيموجي
+_EMOJI_PATTERN     = _re.compile(r'\{(\d{10,})\}')
+
+def resolve_button_label(label: str):
+    """
+    يحوّل label يحتوي على {EMOJI_ID} إلى (clean_label, entities_or_None).
+    مثال: "مرحبا {5368324456789}" → ("مرحبا 💠", [MessageEntity(...)])
+    إذا لم يوجد ID يعيد (label_as_is, None).
+    """
+    entities, result, offset, last_end = [], [], 0, 0
+    for m in _EMOJI_PATTERN.finditer(label):
+        prefix = label[last_end:m.start()]
+        prefix_u16 = len(prefix.encode('utf-16-le')) // 2
+        result.append(prefix)
+        offset += prefix_u16
+        result.append(_EMOJI_PLACEHOLDER)
+        ph_u16 = len(_EMOJI_PLACEHOLDER.encode('utf-16-le')) // 2
+        entities.append(MessageEntity(
+            type=MessageEntityType.CUSTOM_EMOJI,
+            offset=offset,
+            length=ph_u16,
+            custom_emoji_id=m.group(1),
+        ))
+        offset += ph_u16
+        last_end = m.end()
+    result.append(label[last_end:])
+    clean = "".join(result)
+    return clean, (entities if entities else None)
 
 def btn(text, callback_data, style=None):
     if style:
@@ -383,18 +419,23 @@ print("✅ تم تحميل keyboards.py V5.0")
 # ═══════════════════════════════════════════════════════════════
 
 def persistent_kb():
-    """Reply keyboard دائم يظهر للمستخدم — يتم تكوينه من لوحة الأدمن."""
+    """
+    Reply keyboard دائم يظهر للمستخدم — يتم تكوينه من لوحة الأدمن.
+    يدعم {EMOJI_ID} في label الزر لعرض الإيموجيات المميزة البريميوم.
+    """
     buttons = data.get("persistent_buttons", [])
     if not buttons:
         return ReplyKeyboardRemove()
     rows, row = [], []
     for b in buttons:
-        label = b.get("label", "زر")
-        # روابط URL → web_app يفتح داخل تيليجرام (يظهر بمؤشر مميز)
-        if b.get("type") == "url" and b.get("value", "").startswith(("https://",)):
-            row.append(KeyboardButton(label, web_app=WebAppInfo(url=b["value"])))
+        raw_label = b.get("label", "زر")
+        # حوّل {EMOJI_ID} → placeholder مرئي (الـ entities لا تُدعم في KeyboardButton مباشرةً)
+        clean_label, _ = resolve_button_label(raw_label)
+        # روابط URL → web_app يفتح داخل تيليجرام
+        if b.get("type") == "url" and b.get("value", "").startswith("https://"):
+            row.append(KeyboardButton(clean_label, web_app=WebAppInfo(url=b["value"])))
         else:
-            row.append(KeyboardButton(label))
+            row.append(KeyboardButton(clean_label))
         if len(row) == 2:
             rows.append(row); row = []
     if row:
