@@ -318,16 +318,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "returned_after_block",
             "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
         ).replace("{name}", user.first_name or "عزيزي")
-        kb = persistent_kb()
-        has_kb = bool(data.get("persistent_buttons"))
         from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-        if has_kb:
-            welcome_markup = kb
-        else:
-            welcome_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
-            ]])
-        await send_with_custom_emoji(update.message, welcome, reply_markup=welcome_markup)
+        inline_btn = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
+        ]])
+        await send_with_custom_emoji(update.message, welcome, reply_markup=inline_btn)
+        if data.get("persistent_buttons"):
+            try:
+                await update.message.reply_text("⬇️", reply_markup=persistent_kb())
+            except Exception as _e:
+                print(f"persistent_kb error: {_e}")
         if data["status"]["is_away"]:
             await asyncio.sleep(1)
             await send_with_custom_emoji(update.message, data["messages"]["away"])
@@ -343,18 +343,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media_file_id = welcome_media.get("file_id")
     media_type    = welcome_media.get("type")  # "photo" أو "sticker"
 
-    # الكيبورد الدائم — يُرسل مع رسالة الترحيب مباشرةً
-    kb = persistent_kb()
-    has_kb = bool(data.get("persistent_buttons"))
-
     from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-    # لو في أزرار دائمة → لا نُظهر زر "أرسل رسالتك" لأن الكيبورد يكفي
-    if has_kb:
-        welcome_markup = kb
-    else:
-        welcome_markup = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
-        ]])
+    # زر "أرسل رسالتك" — InlineKeyboard دائماً مع رسالة الترحيب
+    inline_btn = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
+    ]])
 
     clean_welcome, welcome_entities = render_custom_emoji_message(welcome)
     if media_file_id and media_type == "photo":
@@ -363,20 +356,27 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 photo=media_file_id,
                 caption=clean_welcome,
                 caption_entities=welcome_entities,
-                reply_markup=welcome_markup
+                reply_markup=inline_btn
             )
         else:
             await update.message.reply_photo(
                 photo=media_file_id,
                 caption=welcome,
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=welcome_markup
+                reply_markup=inline_btn
             )
     elif media_file_id and media_type == "sticker":
         await update.message.reply_sticker(sticker=media_file_id)
-        await send_with_custom_emoji(update.message, welcome, reply_markup=welcome_markup)
+        await send_with_custom_emoji(update.message, welcome, reply_markup=inline_btn)
     else:
-        await send_with_custom_emoji(update.message, welcome, reply_markup=welcome_markup)
+        await send_with_custom_emoji(update.message, welcome, reply_markup=inline_btn)
+
+    # 🟢 الأزرار الدائمة — رسالة منفصلة تحمل ReplyKeyboard
+    if data.get("persistent_buttons"):
+        try:
+            await update.message.reply_text("⬇️", reply_markup=persistent_kb())
+        except Exception as _e:
+            print(f"persistent_kb error: {_e}")
 
     # رسالة الغياب
     if data["status"]["is_away"]:
