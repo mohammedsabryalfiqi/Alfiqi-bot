@@ -667,7 +667,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✏️ **تعديل نص زر حساب المالك**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📌 النص الحالي: {current}\n\n"
             f"📝 أرسل النص الجديد للزر\n"
-            f"✨ يمكنك إرسال إيموجي بريميوم مع النص",
+            f"✨ **لإضافة إيموجي بريميوم:**\n"
+            f"اضغط على حقل الكتابة، ثم اختر الإيموجي المميز من لوحة الإيموجي وأرسل الرسالة",
             reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
         return
 
@@ -679,7 +680,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✏️ **تعديل نص زر مجموعة دكتور خطوط**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📌 النص الحالي: {current}\n\n"
             f"📝 أرسل النص الجديد للزر\n"
-            f"✨ يمكنك إرسال إيموجي بريميوم مع النص",
+            f"✨ **لإضافة إيموجي بريميوم:**\n"
+            f"اضغط على حقل الكتابة، ثم اختر الإيموجي المميز من لوحة الإيموجي وأرسل الرسالة",
             reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
         return
 
@@ -1224,16 +1226,27 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if waiting == "edit_owner_label":
-        # دعم الإيموجي البريميوم: نحفظ النص كما هو (التيليغرام يرسله مع entities)
         if not msg.text and not msg.caption:
             return
         label_text = msg.text or msg.caption or ""
         if not label_text.strip():
             return
+        # حفظ entities الإيموجي البريميوم مع النص
+        entities = msg.entities or msg.caption_entities or []
+        entities_data = []
+        for ent in entities:
+            if ent.type == "custom_emoji":
+                entities_data.append({
+                    "type": "custom_emoji",
+                    "offset": ent.offset,
+                    "length": ent.length,
+                    "custom_emoji_id": ent.custom_emoji_id,
+                })
         if "links" not in data:
             data["links"] = {"owner_account": "", "doctor_fonts_group": "",
                              "owner_label": "👤 حساب المالك", "group_label": "👨‍💻 مجموعة دكتور خطوط"}
         data["links"]["owner_label"] = label_text
+        data["links"]["owner_label_entities"] = entities_data
         save_data(); context.user_data.clear()
         await msg.reply_text(
             f"✅ تم حفظ نص زر حساب المالك!\n\n📝 النص الجديد: {label_text}",
@@ -1246,10 +1259,21 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         label_text = msg.text or msg.caption or ""
         if not label_text.strip():
             return
+        entities = msg.entities or msg.caption_entities or []
+        entities_data = []
+        for ent in entities:
+            if ent.type == "custom_emoji":
+                entities_data.append({
+                    "type": "custom_emoji",
+                    "offset": ent.offset,
+                    "length": ent.length,
+                    "custom_emoji_id": ent.custom_emoji_id,
+                })
         if "links" not in data:
             data["links"] = {"owner_account": "", "doctor_fonts_group": "",
                              "owner_label": "👤 حساب المالك", "group_label": "👨‍💻 مجموعة دكتور خطوط"}
         data["links"]["group_label"] = label_text
+        data["links"]["group_label_entities"] = entities_data
         save_data(); context.user_data.clear()
         await msg.reply_text(
             f"✅ تم حفظ نص زر مجموعة دكتور خطوط!\n\n📝 النص الجديد: {label_text}",

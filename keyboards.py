@@ -1,7 +1,7 @@
 # keyboards.py
 # 🎛️ ملف الأزرار والقوائم - V5.0 (زر بطاقة المستخدم)
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, MessageEntity
 from utils import data
 
 def btn(text, callback_data, style=None):
@@ -422,6 +422,20 @@ print("✅ تم تحميل keyboards.py V5.0")
 # ═══════════════════════════════════════════════════════════════
 #              🟢 أزرار الروابط (تظهر للمستخدم في الترحيب)
 # ═══════════════════════════════════════════════════════════════
+
+def _build_entities(text: str, entities_data: list):
+    """يبني قائمة MessageEntity من البيانات المحفوظة"""
+    result = []
+    for e in (entities_data or []):
+        if e.get("type") == "custom_emoji":
+            result.append(MessageEntity(
+                type="custom_emoji",
+                offset=e["offset"],
+                length=e["length"],
+                custom_emoji_id=e["custom_emoji_id"],
+            ))
+    return result or None
+
 
 def welcome_links_btns():
     """أزرار خضراء للروابط تظهر للمستخدم تحت رسالة الترحيب"""
