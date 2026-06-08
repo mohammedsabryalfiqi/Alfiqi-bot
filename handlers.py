@@ -117,8 +117,9 @@ from keyboards import (
     quick_replies_menu, view_qr_menu,
     banned_menu, vip_menu, broadcast_menu,
     search_menu, search_results_menu, guide_menu,
-    incoming_msg_btns, user_info_menu, confirm_menu,
-    users_list_menu
+    incoming_msg_btns, incoming_msg_btns_reacted, user_info_menu, confirm_menu,
+    users_list_menu,
+    welcome_links_btns, links_settings_menu
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -257,9 +258,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media_type    = welcome_media.get("type")  # "photo" أو "sticker"
 
     from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-    view_btn = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
-    ]])
+
+    # بناء أزرار الترحيب: زر الإرسال + أزرار الروابط الخضراء
+    send_row = [InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")]
+    extra_links = welcome_links_btns()
+    if extra_links and extra_links.inline_keyboard:
+        view_btn = InlineKeyboardMarkup([send_row] + list(extra_links.inline_keyboard))
+    else:
+        view_btn = InlineKeyboardMarkup([send_row])
 
     if media_file_id and media_type == "photo":
         await update.message.reply_photo(
@@ -591,6 +597,73 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(status, show_alert=True)
         await query.edit_message_text("⚙️ **الإعدادات**\n━━━━━━━━━━━━━━━━━━━━━━━━",
             reply_markup=settings_menu(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if cb == "links_settings":
+        if not is_owner(user.id): return
+        links = data.get("links", {})
+        owner_val   = links.get("owner_account")  or "لم يُضبط بعد"
+        group_val   = links.get("doctor_fonts_group") or "لم يُضبط بعد"
+        owner_label = links.get("owner_label", "👤 حساب المالك") or "👤 حساب المالك"
+        group_label = links.get("group_label", "👨‍💻 مجموعة دكتور خطوط") or "👨‍💻 مجموعة دكتور خطوط"
+        await query.edit_message_text(
+            f"🔗 **إدارة الروابط**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 حساب المالك:\n`{owner_val}`\n"
+            f"📝 نص الزر: {owner_label}\n\n"
+            f"👨‍💻 مجموعة دكتور خطوط:\n`{group_val}`\n"
+            f"📝 نص الزر: {group_label}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 هذه الأزرار تظهر للمستخدمين في رسالة الترحيب\n"
+            f"✨ يمكن إضافة إيموجي بريميوم في نص الزر",
+            reply_markup=links_settings_menu(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if cb == "edit_owner_link":
+        if not is_owner(user.id): return
+        context.user_data["waiting"] = "edit_owner_link"
+        current = data.get("links", {}).get("owner_account", "")
+        current_text = f"\n\n📌 الرابط الحالي:\n`{current}`" if current else ""
+        await query.edit_message_text(
+            f"✏️ **تعديل رابط حساب المالك**\n━━━━━━━━━━━━━━━━━━━━━━━━{current_text}\n\n"
+            f"📝 أرسل الرابط الجديد (مثال: https://t.me/username)\n"
+            f"أو أرسل **حذف** لإزالة الرابط",
+            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if cb == "edit_group_link":
+        if not is_owner(user.id): return
+        context.user_data["waiting"] = "edit_group_link"
+        current = data.get("links", {}).get("doctor_fonts_group", "")
+        current_text = f"\n\n📌 الرابط الحالي:\n`{current}`" if current else ""
+        await query.edit_message_text(
+            f"✏️ **تعديل رابط مجموعة دكتور خطوط**\n━━━━━━━━━━━━━━━━━━━━━━━━{current_text}\n\n"
+            f"📝 أرسل الرابط الجديد (مثال: https://t.me/groupname)\n"
+            f"أو أرسل **حذف** لإزالة الرابط",
+            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if cb == "edit_owner_label":
+        if not is_owner(user.id): return
+        context.user_data["waiting"] = "edit_owner_label"
+        current = data.get("links", {}).get("owner_label", "👤 حساب المالك")
+        await query.edit_message_text(
+            f"✏️ **تعديل نص زر حساب المالك**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 النص الحالي: {current}\n\n"
+            f"📝 أرسل النص الجديد للزر\n"
+            f"✨ يمكنك إرسال إيموجي بريميوم مع النص",
+            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if cb == "edit_group_label":
+        if not is_owner(user.id): return
+        context.user_data["waiting"] = "edit_group_label"
+        current = data.get("links", {}).get("group_label", "👨‍💻 مجموعة دكتور خطوط")
+        await query.edit_message_text(
+            f"✏️ **تعديل نص زر مجموعة دكتور خطوط**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 النص الحالي: {current}\n\n"
+            f"📝 أرسل النص الجديد للزر\n"
+            f"✨ يمكنك إرسال إيموجي بريميوم مع النص",
+            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
         return
 
     if cb == "smart_replies":
@@ -960,6 +1033,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cb == "none":
         return
 
+    # ── معالج أزرار التفاعل — الأونر يضغط وتوصل للمستخدم ──
+    if cb.startswith("react_"):
+        # react_{user_id}_{emoji}
+        parts = cb.split("_", 2)
+        if len(parts) < 3:
+            return
+        react_uid = parts[1]
+        react_emoji = parts[2]
+
+        # إشعار المستخدم بالتفاعل
+        user_name_owner = (query.from_user.first_name or "") + (" " + query.from_user.last_name if query.from_user.last_name else "")
+        try:
+            await context.bot.send_message(
+                int(react_uid),
+                f"{react_emoji} تفاعل معك صاحب البوت على رسالتك!",
+            )
+        except Exception:
+            pass
+
+        # تحديث الأزرار لإظهار التفاعل المختار
+        try:
+            from keyboards import incoming_msg_btns_reacted
+            await query.edit_message_reply_markup(
+                reply_markup=incoming_msg_btns_reacted(int(react_uid), react_emoji)
+            )
+        except Exception:
+            pass
+
+        await query.answer(f"{react_emoji} تم إرسال التفاعل!", show_alert=False)
+        return
+
 
 # ═══════════════════════════════════════════════════════════════
 #                      💬 معالج الرسائل
@@ -1020,6 +1124,65 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["messages"]["returned_after_block"] = msg.text
         save_data(); context.user_data.clear()
         await msg.reply_text("✅ تم حفظ رسالة العودة بعد الحظر!", reply_markup=back_btn("msg_settings"))
+        return
+
+    if waiting == "edit_owner_link" and msg.text:
+        if "links" not in data:
+            data["links"] = {"owner_account": "", "doctor_fonts_group": ""}
+        if msg.text.strip().lower() == "حذف":
+            data["links"]["owner_account"] = ""
+            save_data(); context.user_data.clear()
+            await msg.reply_text("🗑 تم حذف رابط حساب المالك", reply_markup=back_btn("links_settings"))
+        else:
+            data["links"]["owner_account"] = msg.text.strip()
+            save_data(); context.user_data.clear()
+            await msg.reply_text("✅ تم حفظ رابط حساب المالك!", reply_markup=back_btn("links_settings"))
+        return
+
+    if waiting == "edit_group_link" and msg.text:
+        if "links" not in data:
+            data["links"] = {"owner_account": "", "doctor_fonts_group": ""}
+        if msg.text.strip().lower() == "حذف":
+            data["links"]["doctor_fonts_group"] = ""
+            save_data(); context.user_data.clear()
+            await msg.reply_text("🗑 تم حذف رابط مجموعة دكتور خطوط", reply_markup=back_btn("links_settings"))
+        else:
+            data["links"]["doctor_fonts_group"] = msg.text.strip()
+            save_data(); context.user_data.clear()
+            await msg.reply_text("✅ تم حفظ رابط مجموعة دكتور خطوط!", reply_markup=back_btn("links_settings"))
+        return
+
+    if waiting == "edit_owner_label":
+        # دعم الإيموجي البريميوم: نحفظ النص كما هو (التيليغرام يرسله مع entities)
+        if not msg.text and not msg.caption:
+            return
+        label_text = msg.text or msg.caption or ""
+        if not label_text.strip():
+            return
+        if "links" not in data:
+            data["links"] = {"owner_account": "", "doctor_fonts_group": "",
+                             "owner_label": "👤 حساب المالك", "group_label": "👨‍💻 مجموعة دكتور خطوط"}
+        data["links"]["owner_label"] = label_text
+        save_data(); context.user_data.clear()
+        await msg.reply_text(
+            f"✅ تم حفظ نص زر حساب المالك!\n\n📝 النص الجديد: {label_text}",
+            reply_markup=back_btn("links_settings"))
+        return
+
+    if waiting == "edit_group_label":
+        if not msg.text and not msg.caption:
+            return
+        label_text = msg.text or msg.caption or ""
+        if not label_text.strip():
+            return
+        if "links" not in data:
+            data["links"] = {"owner_account": "", "doctor_fonts_group": "",
+                             "owner_label": "👤 حساب المالك", "group_label": "👨‍💻 مجموعة دكتور خطوط"}
+        data["links"]["group_label"] = label_text
+        save_data(); context.user_data.clear()
+        await msg.reply_text(
+            f"✅ تم حفظ نص زر مجموعة دكتور خطوط!\n\n📝 النص الجديد: {label_text}",
+            reply_markup=back_btn("links_settings"))
         return
 
     if waiting == "sr_trigger" and msg.text:
@@ -1245,16 +1408,50 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             btn_markup = incoming_msg_btns(int(uid))
             reply_label = f"↩️ رد على رسالتك" if is_reply_ctx else None
 
+            # ── حذف رسالة التأكيد السابقة للمستخدم إن وجدت ──
+            prev_conf_id = data["users"].get(uid, {}).get("last_confirmation_msg_id")
+            if prev_conf_id:
+                try:
+                    await context.bot.delete_message(chat_id=msg.chat_id, message_id=int(prev_conf_id))
+                except Exception:
+                    pass
+                data["users"][uid]["last_confirmation_msg_id"] = None
+
             # forward الرسالة كما هي بدون أي إضافة
             fwd = await msg.forward(OWNER_ID)
 
             if fwd is None:
                 raise Exception("فشل إرسال الرسالة للمالك")
 
+            # ── إرسال رسالة بجانب الـ forward للأونر مع أزرار التفاعل ──
+            from keyboards import incoming_msg_btns
+            reaction_btns = incoming_msg_btns(int(uid))
+            reaction_msg = await context.bot.send_message(
+                OWNER_ID,
+                f"📩 رسالة من **{user_name}**{uname_tag} | `{uid}`",
+                parse_mode="Markdown",
+                reply_markup=reaction_btns,
+                reply_to_message_id=fwd.message_id
+            )
+
             data["msg_map"][str(fwd.message_id)] = {
                 "user_id": uid,
-                "user_msg_id": msg.message_id
+                "user_msg_id": msg.message_id,
+                "reaction_msg_id": reaction_msg.message_id
             }
+            # ربط رسالة التفاعل بـ msg_map أيضاً
+            data["msg_map"][str(reaction_msg.message_id)] = {
+                "user_id": uid,
+                "user_msg_id": msg.message_id,
+                "is_reaction_msg": True
+            }
+            save_data()
+
+            # ── إرسال رسالة تأكيد للمستخدم ──
+            received_text = data["messages"].get("received", "✅ تم إرسال رسالتك بنجاح! انتظر الرد ❤️")
+            conf_msg = await msg.reply_text(received_text)
+            # حفظ id رسالة التأكيد لحذفها عند الرسالة القادمة
+            data["users"][uid]["last_confirmation_msg_id"] = conf_msg.message_id
             save_data()
 
             # إرسال للمشرفين (forward بسيط)

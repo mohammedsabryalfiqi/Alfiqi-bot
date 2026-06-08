@@ -114,9 +114,10 @@ def settings_menu():
     away_icon  = "🟢" if data["status"]["is_away"]             else "🔴"
     smart_icon = "🟢" if data["status"]["smart_reply_enabled"] else "🔴"
     return InlineKeyboardMarkup([
-        [btn("📝 رسائل البوت",             "msg_settings",  "primary")],
-        [btn(f"{away_icon} وضع الغياب",    "away_settings", "primary")],
-        [btn(f"{smart_icon} الردود الذكية","toggle_smart",  "primary")],
+        [btn("📝 رسائل البوت",             "msg_settings",   "primary")],
+        [btn(f"{away_icon} وضع الغياب",    "away_settings",  "primary")],
+        [btn(f"{smart_icon} الردود الذكية","toggle_smart",   "primary")],
+        [btn("🔗 إدارة الروابط",           "links_settings", "success")],
         [btn("🔙 رجوع", "main",            "primary")],
     ])
 
@@ -317,7 +318,53 @@ def incoming_msg_btns(user_id):
             "primary" if is_user_banned else "danger",
         ),
     ]
-    rows = [row0, row1]
+
+    # أزرار التفاعل — يضغط عليها الأونر، تظهر للمستخدم ويصله إشعار
+    row_reactions = [
+        InlineKeyboardButton("❤️", callback_data=f"react_{user_id}_❤️"),
+        InlineKeyboardButton("👍", callback_data=f"react_{user_id}_👍"),
+        InlineKeyboardButton("😂", callback_data=f"react_{user_id}_😂"),
+        InlineKeyboardButton("🔥", callback_data=f"react_{user_id}_🔥"),
+        InlineKeyboardButton("👏", callback_data=f"react_{user_id}_👏"),
+    ]
+
+    rows = [row0, row1, row_reactions]
+
+    quick_btns = []
+    for title in list(data["quick_replies"].keys())[:3]:
+        quick_btns.append(btn(f"💬 {title[:8]}", f"sendqr_{user_id}_{title}", "primary"))
+    if quick_btns:
+        rows.append(quick_btns)
+
+    return InlineKeyboardMarkup(rows)
+
+
+def incoming_msg_btns_reacted(user_id, emoji: str):
+    """نفس الأزرار لكن مع إبراز الإيموجي اللي الأونر اختاره"""
+    uid            = str(user_id)
+    is_user_vip    = uid in data["vip_users"]
+    is_user_banned = uid in data["banned"]
+    user_name      = data["users"].get(uid, {}).get("name", "مجهول")
+
+    badge = " ⭐" if is_user_vip else (" 🚫" if is_user_banned else "")
+    row0 = [btn(f"👤 {user_name}{badge}", f"user_{user_id}", "primary")]
+
+    row1 = [
+        btn("↩️ رد", f"reply_{user_id}", "primary"),
+        btn(
+            "✅ فك حظر" if is_user_banned else "🚫 حظر",
+            f"unban_{user_id}" if is_user_banned else f"ban_{user_id}",
+            "primary" if is_user_banned else "danger",
+        ),
+    ]
+
+    EMOJIS = ["❤️", "👍", "😂", "🔥", "👏"]
+    row_reactions = []
+    for em in EMOJIS:
+        label = f"✅{em}" if em == emoji else em
+        row_reactions.append(InlineKeyboardButton(label, callback_data=f"react_{user_id}_{em}"))
+
+    rows = [row0, row1, row_reactions]
 
     quick_btns = []
     for title in list(data["quick_replies"].keys())[:3]:
@@ -369,3 +416,41 @@ def confirm_menu(action, cancel_to="main"):
     ])
 
 print("✅ تم تحميل keyboards.py V5.0")
+
+# ═══════════════════════════════════════════════════════════════
+#              🟢 أزرار الروابط (تظهر للمستخدم في الترحيب)
+# ═══════════════════════════════════════════════════════════════
+
+def welcome_links_btns():
+    """أزرار خضراء للروابط تظهر للمستخدم تحت رسالة الترحيب"""
+    links = data.get("links", {})
+    owner_link  = links.get("owner_account", "")
+    group_link  = links.get("doctor_fonts_group", "")
+    owner_label = links.get("owner_label", "👤 حساب المالك") or "👤 حساب المالك"
+    group_label = links.get("group_label", "👨‍💻 مجموعة دكتور خطوط") or "👨‍💻 مجموعة دكتور خطوط"
+
+    rows = []
+    if owner_link:
+        rows.append([InlineKeyboardButton(owner_label, url=owner_link)])
+    if group_link:
+        rows.append([InlineKeyboardButton(group_label, url=group_link)])
+
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+# ═══════════════════════════════════════════════════════════════
+#              ⚙️ إدارة الروابط (صفحة الأدمن)
+# ═══════════════════════════════════════════════════════════════
+
+def links_settings_menu():
+    """قائمة إدارة الروابط في لوحة الأدمن"""
+    links = data.get("links", {})
+    owner_set = "✅" if links.get("owner_account") else "❌"
+    group_set = "✅" if links.get("doctor_fonts_group") else "❌"
+    return InlineKeyboardMarkup([
+        [btn(f"{owner_set} رابط حساب المالك",         "edit_owner_link",       "success")],
+        [btn("✏️ تعديل نص زر المالك",                  "edit_owner_label",      "primary")],
+        [btn(f"{group_set} رابط مجموعة دكتور خطوط",   "edit_group_link",       "success")],
+        [btn("✏️ تعديل نص زر المجموعة",                "edit_group_label",      "primary")],
+        [btn("🔙 رجوع", "settings", "primary")],
+    ])
