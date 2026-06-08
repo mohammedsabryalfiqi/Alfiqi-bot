@@ -31,6 +31,15 @@ def e(code: str) -> str:
             return code
     return code
 
+def md_escape(text: str) -> str:
+    """تهريب الرموز الخاصة في Markdown v1 لمنع أخطاء parse_entities"""
+    if not text:
+        return ""
+    # الرموز الخاصة في Markdown v1: * _ ` [
+    for ch in ('\\', '*', '_', '`', '['):
+        text = text.replace(ch, '\\' + ch)
+    return text
+
 from config import (
     OWNER_ID, data, save_data,
     is_owner, is_admin, can_reply, is_banned, is_vip,
@@ -119,7 +128,8 @@ from keyboards import (
     search_menu, search_results_menu, guide_menu,
     incoming_msg_btns, incoming_msg_btns_reacted, user_info_menu, confirm_menu,
     users_list_menu,
-    welcome_links_btns, links_settings_menu
+    welcome_links_btns, links_settings_menu,
+    user_reply_keyboard, remove_reply_keyboard, menu_buttons_admin
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -198,7 +208,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         away = "🔴 غائب" if data["status"]["is_away"] else "🟢 متاح"
         text = f"""👑 **لوحة تحكم المالك**
 ━━━━━━━━━━━━━━━━━━━━━━━━
-مرحباً يا **{user.first_name}** 👋
+مرحباً يا **{md_escape(user.first_name)}** 👋
 
 📊 **الإحصائيات:**
 ├ 👥 المستخدمين: **{len(data['users'])}**
@@ -216,7 +226,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # مشرف
     if is_admin(user.id):
         await update.message.reply_text(
-            f"👨‍💼 **مرحباً أيها المشرف {user.first_name}**\n\nيمكنك الرد على الرسائل المحولة",
+            f"👨‍💼 **مرحباً أيها المشرف {md_escape(user.first_name)}**\n\nيمكنك الرد على الرسائل المحولة",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -234,13 +244,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome = data["messages"].get(
             "returned_after_block",
             "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
-        ).replace("{name}", user.first_name or "عزيزي")
+        ).replace("{name}", md_escape(user.first_name or "عزيزي"))
 
     if previously_blocked:
         welcome = data["messages"].get(
             "returned_after_block",
             "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
-        ).replace("{name}", user.first_name or "عزيزي")
+        ).replace("{name}", md_escape(user.first_name or "عزيزي"))
         await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN)
         if data["status"]["is_away"]:
             await asyncio.sleep(1)
@@ -248,7 +258,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # مستخدم عادي
-    welcome = data["messages"]["welcome"].replace("{name}", user.first_name or "عزيزي")
+    welcome = data["messages"]["welcome"].replace("{name}", md_escape(user.first_name or "عزيزي"))
     if is_vip(user.id):
         welcome = f"⭐ **مرحباً VIP** ⭐\n\n{welcome}"
 
@@ -267,6 +277,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         view_btn = InlineKeyboardMarkup([send_row])
 
+    # القائمة الدائمة (Reply Keyboard)
+    persistent_kb = user_reply_keyboard()
+
     if media_file_id and media_type == "photo":
         await update.message.reply_photo(
             photo=media_file_id,
@@ -274,11 +287,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=view_btn
         )
+        if persistent_kb:
+            await update.message.reply_text("📋", reply_markup=persistent_kb)
     elif media_file_id and media_type == "sticker":
         await update.message.reply_sticker(sticker=media_file_id)
-        await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN, reply_markup=view_btn)
+        await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN,
+                                        reply_markup=persistent_kb or view_btn)
     else:
-        await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN,
+                                        reply_markup=persistent_kb or view_btn)
 
     # رسالة الغياب
     if data["status"]["is_away"]:
@@ -664,6 +681,60 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📝 أرسل النص الجديد للزر\n"
             f"✨ يمكنك إرسال إيموجي بريميوم مع النص",
             reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # ── إدارة القائمة الدائمة ──
+    if cb == "menu_buttons_settings":
+        if not is_owner(user.id): return
+        count = len(data.get("menu_buttons", []))
+        await query.edit_message_text(
+            f"📋 **القائمة الدائمة للمستخدمين**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 عدد الأزرار: **{count}**\n\n"
+            f"💡 هذه الأزرار تظهر دائماً في الأسفل للمستخدم\n"
+            f"✨ تدعم الإيموجي البريميوم\n"
+            f"📐 تُرتَّب صفَّين صفَّين",
+            reply_markup=menu_buttons_admin(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if cb == "mb_add":
+        if not is_owner(user.id): return
+        context.user_data["waiting"] = "mb_add"
+        await query.edit_message_text(
+            "➕ **إضافة زر للقائمة الدائمة**\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📝 أرسل نص الزر\n"
+            "✨ يمكنك إرسال إيموجي بريميوم مع النص",
+            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if cb.startswith("mb_del_"):
+        if not is_owner(user.id): return
+        idx = int(cb.split("_")[-1])
+        buttons = data.get("menu_buttons", [])
+        if 0 <= idx < len(buttons):
+            removed = buttons.pop(idx)
+            data["menu_buttons"] = buttons
+            save_data()
+            await query.answer(f"🗑️ تم حذف: {removed['text'][:15]}", show_alert=True)
+        count = len(data.get("menu_buttons", []))
+        await query.edit_message_text(
+            f"📋 **القائمة الدائمة للمستخدمين**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 عدد الأزرار: **{count}**",
+            reply_markup=menu_buttons_admin(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if cb == "mb_clear":
+        if not is_owner(user.id): return
+        data["menu_buttons"] = []
+        save_data()
+        await query.answer("🗑️ تم حذف كل الأزرار", show_alert=True)
+        await query.edit_message_text(
+            "📋 **القائمة الدائمة للمستخدمين**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📊 عدد الأزرار: **0**",
+            reply_markup=menu_buttons_admin(), parse_mode=ParseMode.MARKDOWN)
+        return
+
+    if cb.startswith("mb_noop_"):
+        await query.answer()
         return
 
     if cb == "smart_replies":
@@ -1185,6 +1256,21 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=back_btn("links_settings"))
         return
 
+    if waiting == "mb_add":
+        btn_text = msg.text or msg.caption or ""
+        if not btn_text.strip():
+            await msg.reply_text("❌ أرسل نص الزر", reply_markup=cancel_btn())
+            return
+        if "menu_buttons" not in data:
+            data["menu_buttons"] = []
+        data["menu_buttons"].append({"text": btn_text})
+        save_data(); context.user_data.clear()
+        count = len(data["menu_buttons"])
+        await msg.reply_text(
+            f"✅ تم إضافة الزر!\n\n📝 النص: {btn_text}\n📊 إجمالي الأزرار: {count}",
+            reply_markup=back_btn("menu_buttons_settings"))
+        return
+
     if waiting == "sr_trigger" and msg.text:
         context.user_data["sr_trigger"] = msg.text.strip()
         context.user_data["waiting"]    = "sr_response"
@@ -1366,6 +1452,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(user.id) and not is_admin(user.id):
         uid = str(user.id)
 
+        # ── تحقق إذا الرسالة من زر القائمة الدائمة ──
+        menu_btns = data.get("menu_buttons", [])
+        if msg.text and menu_btns:
+            matched = next((b for b in menu_btns if b["text"] == msg.text), None)
+            if matched:
+                # الزر ضُغط — أرسله للأونر كرسالة عادية بدون معالجة إضافية
+                pass  # يكمل التدفق الطبيعي ويُحوَّل للأونر
+
         # فحص الكتم - لو مكتوم نتجاهل الرسالة بصمت
         if uid in data.get("muted", []):
             return
@@ -1428,7 +1522,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reaction_btns = incoming_msg_btns(int(uid))
             reaction_msg = await context.bot.send_message(
                 OWNER_ID,
-                f"📩 رسالة من **{user_name}**{uname_tag} | `{uid}`",
+                f"📩 رسالة من **{md_escape(user_name)}**{uname_tag} | `{uid}`",
                 parse_mode="Markdown",
                 reply_markup=reaction_btns,
                 reply_to_message_id=fwd.message_id
@@ -1575,7 +1669,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_name = data["users"].get(uid, {}).get("name", uid)
                 confirm = await context.bot.send_message(
                     msg.chat_id,
-                    f"🚫 **تم حظر المستخدم**\n━━━━━━━━━━━━━━━━━━━━━━━━\n👤 {user_name}\n🆔 `{uid}`",
+                    f"🚫 **تم حظر المستخدم**\n━━━━━━━━━━━━━━━━━━━━━━━━\n👤 {md_escape(user_name)}\n🆔 `{uid}`",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 try:
@@ -1605,7 +1699,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_name = data["users"].get(uid, {}).get("name", uid)
                 confirm = await context.bot.send_message(
                     msg.chat_id,
-                    f"{muted_status}\n━━━━━━━━━━━━━━━━━━━━━━━━\n👤 {user_name}\n🆔 `{uid}`",
+                    f"{muted_status}\n━━━━━━━━━━━━━━━━━━━━━━━━\n👤 {md_escape(user_name)}\n🆔 `{uid}`",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 try:

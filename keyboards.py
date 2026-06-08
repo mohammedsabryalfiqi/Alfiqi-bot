@@ -1,7 +1,7 @@
 # keyboards.py
 # 🎛️ ملف الأزرار والقوائم - V5.0 (زر بطاقة المستخدم)
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from utils import data
 
 def btn(text, callback_data, style=None):
@@ -113,11 +113,13 @@ def select_user_menu():
 def settings_menu():
     away_icon  = "🟢" if data["status"]["is_away"]             else "🔴"
     smart_icon = "🟢" if data["status"]["smart_reply_enabled"] else "🔴"
+    has_menu   = "✅" if data.get("menu_buttons") else "❌"
     return InlineKeyboardMarkup([
         [btn("📝 رسائل البوت",             "msg_settings",   "primary")],
         [btn(f"{away_icon} وضع الغياب",    "away_settings",  "primary")],
         [btn(f"{smart_icon} الردود الذكية","toggle_smart",   "primary")],
         [btn("🔗 إدارة الروابط",           "links_settings", "success")],
+        [btn(f"{has_menu} القائمة الدائمة", "menu_buttons_settings", "success")],
         [btn("🔙 رجوع", "main",            "primary")],
     ])
 
@@ -454,3 +456,52 @@ def links_settings_menu():
         [btn("✏️ تعديل نص زر المجموعة",                "edit_group_label",      "primary")],
         [btn("🔙 رجوع", "settings", "primary")],
     ])
+
+# ═══════════════════════════════════════════════════════════════
+#        📋 القائمة الدائمة للمستخدم (Reply Keyboard)
+# ═══════════════════════════════════════════════════════════════
+
+def user_reply_keyboard():
+    """
+    ينشئ ReplyKeyboard دائمة من أزرار menu_buttons المحفوظة.
+    إذا لا توجد أزرار يُعيد None.
+    الأزرار تُوزَّع صفَّين صفَّين.
+    """
+    buttons = data.get("menu_buttons", [])
+    if not buttons:
+        return None
+    rows = []
+    row = []
+    for i, btn_data in enumerate(buttons):
+        row.append(KeyboardButton(btn_data["text"]))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
+
+
+def remove_reply_keyboard():
+    return ReplyKeyboardRemove()
+
+
+# ═══════════════════════════════════════════════════════════════
+#        ⚙️ إدارة أزرار القائمة الدائمة (صفحة الأدمن)
+# ═══════════════════════════════════════════════════════════════
+
+def menu_buttons_admin():
+    """قائمة إدارة الأزرار الدائمة في لوحة الأدمن"""
+    buttons = data.get("menu_buttons", [])
+    rows = []
+    for i, b in enumerate(buttons):
+        short = b["text"][:20]
+        rows.append([
+            btn(f"🔤 {short}", f"mb_noop_{i}", "primary"),
+            btn("🗑️", f"mb_del_{i}", "danger"),
+        ])
+    rows.append([btn("➕ إضافة زر", "mb_add", "success")])
+    if buttons:
+        rows.append([btn("🗑️ حذف الكل", "mb_clear", "danger")])
+    rows.append([btn("🔙 رجوع", "settings", "primary")])
+    return InlineKeyboardMarkup(rows)
