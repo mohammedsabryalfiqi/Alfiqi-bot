@@ -318,13 +318,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "returned_after_block",
             "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
         ).replace("{name}", user.first_name or "عزيزي")
-
-    if previously_blocked:
-        welcome = data["messages"].get(
-            "returned_after_block",
-            "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
-        ).replace("{name}", user.first_name or "عزيزي")
-        await send_with_custom_emoji(update.message, welcome)
+        kb = persistent_kb()
+        has_kb = bool(data.get("persistent_buttons"))
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+        if has_kb:
+            welcome_markup = kb
+        else:
+            welcome_markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
+            ]])
+        await send_with_custom_emoji(update.message, welcome, reply_markup=welcome_markup)
         if data["status"]["is_away"]:
             await asyncio.sleep(1)
             await send_with_custom_emoji(update.message, data["messages"]["away"])
