@@ -41,6 +41,8 @@ DEFAULT_DATA = {
     "user_notes":   {},
     "msg_map":      {},
     "emoji_packs":  [],
+    "persistent_buttons": [],   # [{label, type:"text"|"url", value}]
+    "received_msgs": {},        # uid -> message_id لرسالة "تم الاستلام" الحالية
     "stats": {
         "total_received": 0,
         "total_sent":     0,
@@ -49,13 +51,6 @@ DEFAULT_DATA = {
         "today_date":     "",
     },
     "_backup_message_id": None,   # ID رسالة الباكب في Telegram
-    "links": {
-        "owner_account":       "",            # رابط حساب المالك
-        "owner_label":         "👤 حساب المالك",  # نص زر حساب المالك
-        "doctor_fonts_group":  "",            # رابط مجموعة دكتور خطوط
-        "group_label":         "👨‍💻 مجموعة دكتور خطوط",  # نص زر المجموعة
-    },
-    "menu_buttons": [],   # أزرار القائمة الدائمة للمستخدم [ {"text": "..."} , ... ]
 }
 
 # ═══════════════════════════════════════════════════════════════

@@ -31,15 +31,6 @@ def e(code: str) -> str:
             return code
     return code
 
-def md_escape(text: str) -> str:
-    """تهريب الرموز الخاصة في Markdown v1 لمنع أخطاء parse_entities"""
-    if not text:
-        return ""
-    # الرموز الخاصة في Markdown v1: * _ ` [
-    for ch in ('\\', '*', '_', '`', '['):
-        text = text.replace(ch, '\\' + ch)
-    return text
-
 from config import (
     OWNER_ID, data, save_data,
     is_owner, is_admin, can_reply, is_banned, is_vip,
@@ -119,6 +110,7 @@ async def resolve_custom_emoji(bot, token: str):
     return item
 
 from keyboards import (
+    persistent_kb, pbuttons_menu, pbtn_view_menu,
     back_btn, cancel_btn, main_menu,
     stats_menu, admins_menu, admin_perms_menu, select_user_menu,
     settings_menu, msg_settings_menu, away_menu,
@@ -126,10 +118,8 @@ from keyboards import (
     quick_replies_menu, view_qr_menu,
     banned_menu, vip_menu, broadcast_menu,
     search_menu, search_results_menu, guide_menu,
-    incoming_msg_btns, incoming_msg_btns_reacted, user_info_menu, confirm_menu,
-    users_list_menu,
-    welcome_links_btns, links_settings_menu,
-    user_reply_keyboard, remove_reply_keyboard, menu_buttons_admin
+    incoming_msg_btns, user_info_menu, confirm_menu,
+    users_list_menu
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -208,7 +198,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         away = "🔴 غائب" if data["status"]["is_away"] else "🟢 متاح"
         text = f"""👑 **لوحة تحكم المالك**
 ━━━━━━━━━━━━━━━━━━━━━━━━
-مرحباً يا **{md_escape(user.first_name)}** 👋
+مرحباً يا **{user.first_name}** 👋
 
 📊 **الإحصائيات:**
 ├ 👥 المستخدمين: **{len(data['users'])}**
@@ -226,7 +216,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # مشرف
     if is_admin(user.id):
         await update.message.reply_text(
-            f"👨‍💼 **مرحباً أيها المشرف {md_escape(user.first_name)}**\n\nيمكنك الرد على الرسائل المحولة",
+            f"👨‍💼 **مرحباً أيها المشرف {user.first_name}**\n\nيمكنك الرد على الرسائل المحولة",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -244,13 +234,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome = data["messages"].get(
             "returned_after_block",
             "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
-        ).replace("{name}", md_escape(user.first_name or "عزيزي"))
+        ).replace("{name}", user.first_name or "عزيزي")
 
     if previously_blocked:
         welcome = data["messages"].get(
             "returned_after_block",
             "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
-        ).replace("{name}", md_escape(user.first_name or "عزيزي"))
+        ).replace("{name}", user.first_name or "عزيزي")
         await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN)
         if data["status"]["is_away"]:
             await asyncio.sleep(1)
@@ -258,7 +248,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # مستخدم عادي
-    welcome = data["messages"]["welcome"].replace("{name}", md_escape(user.first_name or "عزيزي"))
+    welcome = data["messages"]["welcome"].replace("{name}", user.first_name or "عزيزي")
     if is_vip(user.id):
         welcome = f"⭐ **مرحباً VIP** ⭐\n\n{welcome}"
 
@@ -268,17 +258,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media_type    = welcome_media.get("type")  # "photo" أو "sticker"
 
     from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-
-    # بناء أزرار الترحيب: زر الإرسال + أزرار الروابط الخضراء
-    send_row = [InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")]
-    extra_links = welcome_links_btns()
-    if extra_links and extra_links.inline_keyboard:
-        view_btn = InlineKeyboardMarkup([send_row] + list(extra_links.inline_keyboard))
-    else:
-        view_btn = InlineKeyboardMarkup([send_row])
-
-    # القائمة الدائمة (Reply Keyboard)
-    persistent_kb = user_reply_keyboard()
+    view_btn = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
+    ]])
 
     if media_file_id and media_type == "photo":
         await update.message.reply_photo(
@@ -287,15 +269,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=view_btn
         )
-        if persistent_kb:
-            await update.message.reply_text("📋", reply_markup=persistent_kb)
     elif media_file_id and media_type == "sticker":
         await update.message.reply_sticker(sticker=media_file_id)
-        await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN,
-                                        reply_markup=persistent_kb or view_btn)
+        await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN, reply_markup=view_btn)
     else:
-        await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN,
-                                        reply_markup=persistent_kb or view_btn)
+        await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN)
+
+    # 🟢 الأزرار الدائمة للمستخدم
+    try:
+        kb = persistent_kb()
+        if data.get("persistent_buttons"):
+            await update.message.reply_text("⬇️ القائمة:", reply_markup=kb)
+    except Exception as _e:
+        print(f"persistent_kb error: {_e}")
 
     # رسالة الغياب
     if data["status"]["is_away"]:
@@ -358,6 +344,85 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cb == "cancel":
         context.user_data.clear()
         await query.edit_message_text("✅ تم الإلغاء", reply_markup=back_btn())
+        return
+
+
+    # ══════════════════════════════════════════════════════════
+    #              🟢 الأزرار الدائمة (Persistent)
+    # ══════════════════════════════════════════════════════════
+    if cb == "pbuttons":
+        if not is_owner(user.id): return
+        count = len(data.get("persistent_buttons", []))
+        await query.edit_message_text(
+            f"🟢 **الأزرار الدائمة**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 العدد الحالي: **{count}**\n\n"
+            f"الأزرار تظهر للمستخدم دائماً تحت حقل الكتابة.\n"
+            f"💡 زر نص: يرد على المستخدم بنص جاهز\n"
+            f"💡 زر رابط: يفتح صفحة ويب داخل تيليجرام",
+            reply_markup=pbuttons_menu(), parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if cb == "pbtn_add_text":
+        if not is_owner(user.id): return
+        context.user_data["waiting"] = "pbtn_text_label"
+        await query.edit_message_text(
+            "📝 **إضافة زر نص**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "أرسل **اسم الزر** (اللي هيظهر للمستخدم):",
+            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if cb == "pbtn_add_url":
+        if not is_owner(user.id): return
+        context.user_data["waiting"] = "pbtn_url_label"
+        await query.edit_message_text(
+            "🔗 **إضافة زر رابط**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "أرسل **اسم الزر**:",
+            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if cb.startswith("pbtn_view_"):
+        if not is_owner(user.id): return
+        idx = int(cb.split("_")[-1])
+        pbtns = data.get("persistent_buttons", [])
+        if 0 <= idx < len(pbtns):
+            b = pbtns[idx]
+            kind = "🔗 رابط" if b.get("type") == "url" else "💬 نص"
+            await query.edit_message_text(
+                f"🟢 **زر دائم**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📛 الاسم: **{b.get('label','')}**\n"
+                f"🏷️ النوع: {kind}\n"
+                f"📝 القيمة:\n`{b.get('value','')[:200]}`",
+                reply_markup=pbtn_view_menu(idx), parse_mode=ParseMode.MARKDOWN,
+            )
+        return
+
+    if cb.startswith("pbtn_del_"):
+        if not is_owner(user.id): return
+        idx = int(cb.split("_")[-1])
+        pbtns = data.get("persistent_buttons", [])
+        if 0 <= idx < len(pbtns):
+            pbtns.pop(idx)
+            save_data()
+            await query.answer("✅ تم الحذف", show_alert=True)
+        await query.edit_message_text(
+            f"🟢 **الأزرار الدائمة**\n📊 العدد: **{len(data.get('persistent_buttons', []))}**",
+            reply_markup=pbuttons_menu(), parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if cb == "pbtn_clear_all":
+        if not is_owner(user.id): return
+        data["persistent_buttons"] = []
+        save_data()
+        await query.answer("✅ تم حذف الكل", show_alert=True)
+        await query.edit_message_text(
+            "🟢 **الأزرار الدائمة**\n📭 لا توجد أزرار",
+            reply_markup=pbuttons_menu(), parse_mode=ParseMode.MARKDOWN,
+        )
         return
 
     if cb == "main":
@@ -614,129 +679,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(status, show_alert=True)
         await query.edit_message_text("⚙️ **الإعدادات**\n━━━━━━━━━━━━━━━━━━━━━━━━",
             reply_markup=settings_menu(), parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if cb == "links_settings":
-        if not is_owner(user.id): return
-        links = data.get("links", {})
-        owner_val   = links.get("owner_account")  or "لم يُضبط بعد"
-        group_val   = links.get("doctor_fonts_group") or "لم يُضبط بعد"
-        owner_label = links.get("owner_label", "👤 حساب المالك") or "👤 حساب المالك"
-        group_label = links.get("group_label", "👨‍💻 مجموعة دكتور خطوط") or "👨‍💻 مجموعة دكتور خطوط"
-        await query.edit_message_text(
-            f"🔗 **إدارة الروابط**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 حساب المالك:\n`{owner_val}`\n"
-            f"📝 نص الزر: {owner_label}\n\n"
-            f"👨‍💻 مجموعة دكتور خطوط:\n`{group_val}`\n"
-            f"📝 نص الزر: {group_label}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"💡 هذه الأزرار تظهر للمستخدمين في رسالة الترحيب\n"
-            f"✨ يمكن إضافة إيموجي بريميوم في نص الزر",
-            reply_markup=links_settings_menu(), parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if cb == "edit_owner_link":
-        if not is_owner(user.id): return
-        context.user_data["waiting"] = "edit_owner_link"
-        current = data.get("links", {}).get("owner_account", "")
-        current_text = f"\n\n📌 الرابط الحالي:\n`{current}`" if current else ""
-        await query.edit_message_text(
-            f"✏️ **تعديل رابط حساب المالك**\n━━━━━━━━━━━━━━━━━━━━━━━━{current_text}\n\n"
-            f"📝 أرسل الرابط الجديد (مثال: https://t.me/username)\n"
-            f"أو أرسل **حذف** لإزالة الرابط",
-            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if cb == "edit_group_link":
-        if not is_owner(user.id): return
-        context.user_data["waiting"] = "edit_group_link"
-        current = data.get("links", {}).get("doctor_fonts_group", "")
-        current_text = f"\n\n📌 الرابط الحالي:\n`{current}`" if current else ""
-        await query.edit_message_text(
-            f"✏️ **تعديل رابط مجموعة دكتور خطوط**\n━━━━━━━━━━━━━━━━━━━━━━━━{current_text}\n\n"
-            f"📝 أرسل الرابط الجديد (مثال: https://t.me/groupname)\n"
-            f"أو أرسل **حذف** لإزالة الرابط",
-            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if cb == "edit_owner_label":
-        if not is_owner(user.id): return
-        context.user_data["waiting"] = "edit_owner_label"
-        current = data.get("links", {}).get("owner_label", "👤 حساب المالك")
-        await query.edit_message_text(
-            f"✏️ **تعديل نص زر حساب المالك**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📌 النص الحالي: {current}\n\n"
-            f"📝 أرسل النص الجديد للزر\n"
-            f"✨ **لإضافة إيموجي بريميوم:**\n"
-            f"اضغط على حقل الكتابة، ثم اختر الإيموجي المميز من لوحة الإيموجي وأرسل الرسالة",
-            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if cb == "edit_group_label":
-        if not is_owner(user.id): return
-        context.user_data["waiting"] = "edit_group_label"
-        current = data.get("links", {}).get("group_label", "👨‍💻 مجموعة دكتور خطوط")
-        await query.edit_message_text(
-            f"✏️ **تعديل نص زر مجموعة دكتور خطوط**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📌 النص الحالي: {current}\n\n"
-            f"📝 أرسل النص الجديد للزر\n"
-            f"✨ **لإضافة إيموجي بريميوم:**\n"
-            f"اضغط على حقل الكتابة، ثم اختر الإيموجي المميز من لوحة الإيموجي وأرسل الرسالة",
-            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
-        return
-
-    # ── إدارة القائمة الدائمة ──
-    if cb == "menu_buttons_settings":
-        if not is_owner(user.id): return
-        count = len(data.get("menu_buttons", []))
-        await query.edit_message_text(
-            f"📋 **القائمة الدائمة للمستخدمين**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 عدد الأزرار: **{count}**\n\n"
-            f"💡 هذه الأزرار تظهر دائماً في الأسفل للمستخدم\n"
-            f"✨ تدعم الإيموجي البريميوم\n"
-            f"📐 تُرتَّب صفَّين صفَّين",
-            reply_markup=menu_buttons_admin(), parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if cb == "mb_add":
-        if not is_owner(user.id): return
-        context.user_data["waiting"] = "mb_add"
-        await query.edit_message_text(
-            "➕ **إضافة زر للقائمة الدائمة**\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "📝 أرسل نص الزر\n"
-            "✨ يمكنك إرسال إيموجي بريميوم مع النص",
-            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if cb.startswith("mb_del_"):
-        if not is_owner(user.id): return
-        idx = int(cb.split("_")[-1])
-        buttons = data.get("menu_buttons", [])
-        if 0 <= idx < len(buttons):
-            removed = buttons.pop(idx)
-            data["menu_buttons"] = buttons
-            save_data()
-            await query.answer(f"🗑️ تم حذف: {removed['text'][:15]}", show_alert=True)
-        count = len(data.get("menu_buttons", []))
-        await query.edit_message_text(
-            f"📋 **القائمة الدائمة للمستخدمين**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 عدد الأزرار: **{count}**",
-            reply_markup=menu_buttons_admin(), parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if cb == "mb_clear":
-        if not is_owner(user.id): return
-        data["menu_buttons"] = []
-        save_data()
-        await query.answer("🗑️ تم حذف كل الأزرار", show_alert=True)
-        await query.edit_message_text(
-            "📋 **القائمة الدائمة للمستخدمين**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "📊 عدد الأزرار: **0**",
-            reply_markup=menu_buttons_admin(), parse_mode=ParseMode.MARKDOWN)
-        return
-
-    if cb.startswith("mb_noop_"):
-        await query.answer()
         return
 
     if cb == "smart_replies":
@@ -1106,37 +1048,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cb == "none":
         return
 
-    # ── معالج أزرار التفاعل — الأونر يضغط وتوصل للمستخدم ──
-    if cb.startswith("react_"):
-        # react_{user_id}_{emoji}
-        parts = cb.split("_", 2)
-        if len(parts) < 3:
-            return
-        react_uid = parts[1]
-        react_emoji = parts[2]
-
-        # إشعار المستخدم بالتفاعل
-        user_name_owner = (query.from_user.first_name or "") + (" " + query.from_user.last_name if query.from_user.last_name else "")
-        try:
-            await context.bot.send_message(
-                int(react_uid),
-                f"{react_emoji} تفاعل معك صاحب البوت على رسالتك!",
-            )
-        except Exception:
-            pass
-
-        # تحديث الأزرار لإظهار التفاعل المختار
-        try:
-            from keyboards import incoming_msg_btns_reacted
-            await query.edit_message_reply_markup(
-                reply_markup=incoming_msg_btns_reacted(int(react_uid), react_emoji)
-            )
-        except Exception:
-            pass
-
-        await query.answer(f"{react_emoji} تم إرسال التفاعل!", show_alert=False)
-        return
-
 
 # ═══════════════════════════════════════════════════════════════
 #                      💬 معالج الرسائل
@@ -1181,6 +1092,53 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("⚠️ أرسل صورة أو ملصق فقط")
         return
 
+
+    if waiting == "pbtn_text_label" and msg.text:
+        context.user_data["pbtn_label"] = msg.text.strip()[:30]
+        context.user_data["waiting"] = "pbtn_text_value"
+        await msg.reply_text(
+            f"✅ الاسم: **{msg.text.strip()[:30]}**\n\n📝 الآن أرسل **النص** اللي هيرد على المستخدم:",
+            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if waiting == "pbtn_text_value" and msg.text:
+        label = context.user_data.get("pbtn_label", "زر")
+        data.setdefault("persistent_buttons", []).append({
+            "label": label, "type": "text", "value": msg.text,
+        })
+        save_data(); context.user_data.clear()
+        await msg.reply_text(
+            f"✅ تم إضافة الزر **{label}**\n\nاطلب من المستخدم /start علشان يظهر له.",
+            reply_markup=back_btn("pbuttons"), parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if waiting == "pbtn_url_label" and msg.text:
+        context.user_data["pbtn_label"] = msg.text.strip()[:30]
+        context.user_data["waiting"] = "pbtn_url_value"
+        await msg.reply_text(
+            f"✅ الاسم: **{msg.text.strip()[:30]}**\n\n🔗 الآن أرسل **الرابط** (لازم يبدأ بـ https://):",
+            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if waiting == "pbtn_url_value" and msg.text:
+        url = msg.text.strip()
+        if not url.startswith("https://"):
+            await msg.reply_text("❌ الرابط لازم يبدأ بـ https://", reply_markup=cancel_btn())
+            return
+        label = context.user_data.get("pbtn_label", "زر")
+        data.setdefault("persistent_buttons", []).append({
+            "label": label, "type": "url", "value": url,
+        })
+        save_data(); context.user_data.clear()
+        await msg.reply_text(
+            f"✅ تم إضافة زر الرابط **{label}**",
+            reply_markup=back_btn("pbuttons"), parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
     if waiting == "edit_away" and msg.text:
         data["messages"]["away"] = msg.text
         save_data(); context.user_data.clear()
@@ -1197,102 +1155,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["messages"]["returned_after_block"] = msg.text
         save_data(); context.user_data.clear()
         await msg.reply_text("✅ تم حفظ رسالة العودة بعد الحظر!", reply_markup=back_btn("msg_settings"))
-        return
-
-    if waiting == "edit_owner_link" and msg.text:
-        if "links" not in data:
-            data["links"] = {"owner_account": "", "doctor_fonts_group": ""}
-        if msg.text.strip().lower() == "حذف":
-            data["links"]["owner_account"] = ""
-            save_data(); context.user_data.clear()
-            await msg.reply_text("🗑 تم حذف رابط حساب المالك", reply_markup=back_btn("links_settings"))
-        else:
-            data["links"]["owner_account"] = msg.text.strip()
-            save_data(); context.user_data.clear()
-            await msg.reply_text("✅ تم حفظ رابط حساب المالك!", reply_markup=back_btn("links_settings"))
-        return
-
-    if waiting == "edit_group_link" and msg.text:
-        if "links" not in data:
-            data["links"] = {"owner_account": "", "doctor_fonts_group": ""}
-        if msg.text.strip().lower() == "حذف":
-            data["links"]["doctor_fonts_group"] = ""
-            save_data(); context.user_data.clear()
-            await msg.reply_text("🗑 تم حذف رابط مجموعة دكتور خطوط", reply_markup=back_btn("links_settings"))
-        else:
-            data["links"]["doctor_fonts_group"] = msg.text.strip()
-            save_data(); context.user_data.clear()
-            await msg.reply_text("✅ تم حفظ رابط مجموعة دكتور خطوط!", reply_markup=back_btn("links_settings"))
-        return
-
-    if waiting == "edit_owner_label":
-        if not msg.text and not msg.caption:
-            return
-        label_text = msg.text or msg.caption or ""
-        if not label_text.strip():
-            return
-        # حفظ entities الإيموجي البريميوم مع النص
-        entities = msg.entities or msg.caption_entities or []
-        entities_data = []
-        for ent in entities:
-            if ent.type == "custom_emoji":
-                entities_data.append({
-                    "type": "custom_emoji",
-                    "offset": ent.offset,
-                    "length": ent.length,
-                    "custom_emoji_id": ent.custom_emoji_id,
-                })
-        if "links" not in data:
-            data["links"] = {"owner_account": "", "doctor_fonts_group": "",
-                             "owner_label": "👤 حساب المالك", "group_label": "👨‍💻 مجموعة دكتور خطوط"}
-        data["links"]["owner_label"] = label_text
-        data["links"]["owner_label_entities"] = entities_data
-        save_data(); context.user_data.clear()
-        await msg.reply_text(
-            f"✅ تم حفظ نص زر حساب المالك!\n\n📝 النص الجديد: {label_text}",
-            reply_markup=back_btn("links_settings"))
-        return
-
-    if waiting == "edit_group_label":
-        if not msg.text and not msg.caption:
-            return
-        label_text = msg.text or msg.caption or ""
-        if not label_text.strip():
-            return
-        entities = msg.entities or msg.caption_entities or []
-        entities_data = []
-        for ent in entities:
-            if ent.type == "custom_emoji":
-                entities_data.append({
-                    "type": "custom_emoji",
-                    "offset": ent.offset,
-                    "length": ent.length,
-                    "custom_emoji_id": ent.custom_emoji_id,
-                })
-        if "links" not in data:
-            data["links"] = {"owner_account": "", "doctor_fonts_group": "",
-                             "owner_label": "👤 حساب المالك", "group_label": "👨‍💻 مجموعة دكتور خطوط"}
-        data["links"]["group_label"] = label_text
-        data["links"]["group_label_entities"] = entities_data
-        save_data(); context.user_data.clear()
-        await msg.reply_text(
-            f"✅ تم حفظ نص زر مجموعة دكتور خطوط!\n\n📝 النص الجديد: {label_text}",
-            reply_markup=back_btn("links_settings"))
-        return
-
-    if waiting == "mb_add":
-        btn_text = msg.text or msg.caption or ""
-        if not btn_text.strip():
-            await msg.reply_text("❌ أرسل نص الزر", reply_markup=cancel_btn())
-            return
-        if "menu_buttons" not in data:
-            data["menu_buttons"] = []
-        data["menu_buttons"].append({"text": btn_text})
-        save_data(); context.user_data.clear()
-        count = len(data["menu_buttons"])
-        await msg.reply_text(
-            f"✅ تم إضافة الزر!\n\n📝 النص: {btn_text}\n📊 إجمالي الأزرار: {count}",
-            reply_markup=back_btn("menu_buttons_settings"))
         return
 
     if waiting == "sr_trigger" and msg.text:
@@ -1476,17 +1338,24 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(user.id) and not is_admin(user.id):
         uid = str(user.id)
 
-        # ── تحقق إذا الرسالة من زر القائمة الدائمة ──
-        menu_btns = data.get("menu_buttons", [])
-        if msg.text and menu_btns:
-            matched = next((b for b in menu_btns if b["text"] == msg.text), None)
-            if matched:
-                # الزر ضُغط — أرسله للأونر كرسالة عادية بدون معالجة إضافية
-                pass  # يكمل التدفق الطبيعي ويُحوَّل للأونر
-
         # فحص الكتم - لو مكتوم نتجاهل الرسالة بصمت
         if uid in data.get("muted", []):
             return
+
+        # 🟢 اعتراض الأزرار الدائمة — لو النص بيطابق label لزر
+        if msg.text:
+            for pb in data.get("persistent_buttons", []):
+                if msg.text.strip() == pb.get("label", "").strip():
+                    val = pb.get("value", "")
+                    if pb.get("type") == "url":
+                        from telegram import InlineKeyboardButton as _IKB, InlineKeyboardMarkup as _IKM
+                        await msg.reply_text(
+                            pb.get("label", "🔗 رابط"),
+                            reply_markup=_IKM([[_IKB("🔗 فتح الرابط", url=val)]])
+                        )
+                    else:
+                        await msg.reply_text(val or pb.get("label", ""))
+                    return
 
         if uid in data["users"]:
             data["users"][uid]["msg_count"] = data["users"][uid].get("msg_count", 0) + 1
@@ -1526,50 +1395,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             btn_markup = incoming_msg_btns(int(uid))
             reply_label = f"↩️ رد على رسالتك" if is_reply_ctx else None
 
-            # ── حذف رسالة التأكيد السابقة للمستخدم إن وجدت ──
-            prev_conf_id = data["users"].get(uid, {}).get("last_confirmation_msg_id")
-            if prev_conf_id:
-                try:
-                    await context.bot.delete_message(chat_id=msg.chat_id, message_id=int(prev_conf_id))
-                except Exception:
-                    pass
-                data["users"][uid]["last_confirmation_msg_id"] = None
-
             # forward الرسالة كما هي بدون أي إضافة
             fwd = await msg.forward(OWNER_ID)
 
             if fwd is None:
                 raise Exception("فشل إرسال الرسالة للمالك")
 
-            # ── إرسال رسالة بجانب الـ forward للأونر مع أزرار التفاعل ──
-            from keyboards import incoming_msg_btns
-            reaction_btns = incoming_msg_btns(int(uid))
-            reaction_msg = await context.bot.send_message(
-                OWNER_ID,
-                f"📩 رسالة من **{md_escape(user_name)}**{uname_tag} | `{uid}`",
-                parse_mode="Markdown",
-                reply_markup=reaction_btns,
-                reply_to_message_id=fwd.message_id
-            )
-
             data["msg_map"][str(fwd.message_id)] = {
                 "user_id": uid,
-                "user_msg_id": msg.message_id,
-                "reaction_msg_id": reaction_msg.message_id
+                "user_msg_id": msg.message_id
             }
-            # ربط رسالة التفاعل بـ msg_map أيضاً
-            data["msg_map"][str(reaction_msg.message_id)] = {
-                "user_id": uid,
-                "user_msg_id": msg.message_id,
-                "is_reaction_msg": True
-            }
-            save_data()
-
-            # ── إرسال رسالة تأكيد للمستخدم ──
-            received_text = data["messages"].get("received", "✅ تم إرسال رسالتك بنجاح! انتظر الرد ❤️")
-            conf_msg = await msg.reply_text(received_text)
-            # حفظ id رسالة التأكيد لحذفها عند الرسالة القادمة
-            data["users"][uid]["last_confirmation_msg_id"] = conf_msg.message_id
             save_data()
 
             # إرسال للمشرفين (forward بسيط)
@@ -1583,6 +1418,23 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if data["status"]["is_away"]:
                 await asyncio.sleep(1)
                 await msg.reply_text(data["messages"]["away"])
+            else:
+                # ✅ رسالة "تم استقبال رسالتكم" — احذف القديمة وأرسل جديدة كرد على آخر رسالة
+                try:
+                    old_rcv_id = data.get("received_msgs", {}).get(uid)
+                    if old_rcv_id:
+                        try:
+                            await context.bot.delete_message(chat_id=int(uid), message_id=int(old_rcv_id))
+                        except Exception:
+                            pass
+                    sent_rcv = await msg.reply_text(
+                        data["messages"].get("received", "✅ تم استقبال رسالتكم"),
+                        reply_to_message_id=msg.message_id,
+                    )
+                    data.setdefault("received_msgs", {})[uid] = sent_rcv.message_id
+                    save_data()
+                except Exception as _e:
+                    print(f"received_msg error: {_e}")
 
         except Exception as e:
             print(f"❌ خطأ في إرسال رسالة للمالك: {e}")
@@ -1693,7 +1545,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_name = data["users"].get(uid, {}).get("name", uid)
                 confirm = await context.bot.send_message(
                     msg.chat_id,
-                    f"🚫 **تم حظر المستخدم**\n━━━━━━━━━━━━━━━━━━━━━━━━\n👤 {md_escape(user_name)}\n🆔 `{uid}`",
+                    f"🚫 **تم حظر المستخدم**\n━━━━━━━━━━━━━━━━━━━━━━━━\n👤 {user_name}\n🆔 `{uid}`",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 try:
@@ -1723,7 +1575,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_name = data["users"].get(uid, {}).get("name", uid)
                 confirm = await context.bot.send_message(
                     msg.chat_id,
-                    f"{muted_status}\n━━━━━━━━━━━━━━━━━━━━━━━━\n👤 {md_escape(user_name)}\n🆔 `{uid}`",
+                    f"{muted_status}\n━━━━━━━━━━━━━━━━━━━━━━━━\n👤 {user_name}\n🆔 `{uid}`",
                     parse_mode=ParseMode.MARKDOWN
                 )
                 try:
@@ -1989,3 +1841,74 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
 print("✅ تم تحميل handlers.py V4.2")
+
+
+# ═══════════════════════════════════════════════════════════════
+#         💝 معالج تفاعلات المستخدم على رسائل البوت/المالك
+# ═══════════════════════════════════════════════════════════════
+
+async def reaction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يظهر للمالك أي تفاعل (عادي أو Premium custom emoji) من المستخدم."""
+    mr = update.message_reaction
+    if not mr:
+        return
+    user = mr.user
+    if not user or is_owner(user.id):
+        return
+
+    uid = str(user.id)
+    reacted_msg_id = mr.message_id  # message_id داخل محادثة المستخدم
+
+    # حوّل التفاعلات الجديدة إلى نص قابل للعرض
+    new_list = []
+    for r in mr.new_reaction or []:
+        if isinstance(r, ReactionTypeEmoji):
+            new_list.append(r.emoji)
+        elif isinstance(r, ReactionTypeCustomEmoji):
+            new_list.append(f"⭐[premium:{r.custom_emoji_id}]")
+    old_list = []
+    for r in mr.old_reaction or []:
+        if isinstance(r, ReactionTypeEmoji):
+            old_list.append(r.emoji)
+        elif isinstance(r, ReactionTypeCustomEmoji):
+            old_list.append(f"⭐[premium:{r.custom_emoji_id}]")
+
+    # حدد رسالة المالك الأصلية (في محادثته) المرتبطة بـ reacted_msg_id
+    owner_orig_msg_id = None
+    for owner_mid, info in data.get("msg_map", {}).items():
+        try:
+            if str(info.get("user_id")) == uid and int(info.get("sent_id", 0)) == int(reacted_msg_id):
+                owner_orig_msg_id = int(owner_mid)
+                break
+        except Exception:
+            continue
+
+    user_name = data["users"].get(uid, {}).get("name", "مستخدم")
+    if new_list:
+        action = "💝 تفاعل"
+        emojis_txt = " ".join(new_list)
+    elif old_list:
+        action = "🗑️ ألغى تفاعله"
+        emojis_txt = " ".join(old_list)
+    else:
+        return
+
+    text = (
+        f"{action} **{user_name}**  ↩️\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 `{uid}`\n"
+        f"💬 الرسالة في محادثته: `{reacted_msg_id}`\n"
+        f"🎭 التفاعل: {emojis_txt}"
+    )
+
+    try:
+        if owner_orig_msg_id:
+            await context.bot.send_message(
+                OWNER_ID, text,
+                reply_to_message_id=owner_orig_msg_id,
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await context.bot.send_message(OWNER_ID, text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        print(f"reaction_handler error: {e}")

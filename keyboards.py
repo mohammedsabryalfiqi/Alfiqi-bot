@@ -1,7 +1,11 @@
 # keyboards.py
 # 🎛️ ملف الأزرار والقوائم - V5.0 (زر بطاقة المستخدم)
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, MessageEntity
+from telegram import (
+    InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardMarkup, KeyboardButton, WebAppInfo,
+    ReplyKeyboardRemove,
+)
 from utils import data
 
 def btn(text, callback_data, style=None):
@@ -51,6 +55,9 @@ def main_menu():
         ],
         [
             btn("👥 مستخدمين البوت", "users_list", "primary"),
+        ],
+        [
+            btn("🟢 الأزرار الدائمة", "pbuttons", "primary"),
         ],
     ])
 
@@ -113,13 +120,10 @@ def select_user_menu():
 def settings_menu():
     away_icon  = "🟢" if data["status"]["is_away"]             else "🔴"
     smart_icon = "🟢" if data["status"]["smart_reply_enabled"] else "🔴"
-    has_menu   = "✅" if data.get("menu_buttons") else "❌"
     return InlineKeyboardMarkup([
-        [btn("📝 رسائل البوت",             "msg_settings",   "primary")],
-        [btn(f"{away_icon} وضع الغياب",    "away_settings",  "primary")],
-        [btn(f"{smart_icon} الردود الذكية","toggle_smart",   "primary")],
-        [btn("🔗 إدارة الروابط",           "links_settings", "success")],
-        [btn(f"{has_menu} القائمة الدائمة", "menu_buttons_settings", "success")],
+        [btn("📝 رسائل البوت",             "msg_settings",  "primary")],
+        [btn(f"{away_icon} وضع الغياب",    "away_settings", "primary")],
+        [btn(f"{smart_icon} الردود الذكية","toggle_smart",  "primary")],
         [btn("🔙 رجوع", "main",            "primary")],
     ])
 
@@ -320,53 +324,7 @@ def incoming_msg_btns(user_id):
             "primary" if is_user_banned else "danger",
         ),
     ]
-
-    # أزرار التفاعل — يضغط عليها الأونر، تظهر للمستخدم ويصله إشعار
-    row_reactions = [
-        InlineKeyboardButton("❤️", callback_data=f"react_{user_id}_❤️"),
-        InlineKeyboardButton("👍", callback_data=f"react_{user_id}_👍"),
-        InlineKeyboardButton("😂", callback_data=f"react_{user_id}_😂"),
-        InlineKeyboardButton("🔥", callback_data=f"react_{user_id}_🔥"),
-        InlineKeyboardButton("👏", callback_data=f"react_{user_id}_👏"),
-    ]
-
-    rows = [row0, row1, row_reactions]
-
-    quick_btns = []
-    for title in list(data["quick_replies"].keys())[:3]:
-        quick_btns.append(btn(f"💬 {title[:8]}", f"sendqr_{user_id}_{title}", "primary"))
-    if quick_btns:
-        rows.append(quick_btns)
-
-    return InlineKeyboardMarkup(rows)
-
-
-def incoming_msg_btns_reacted(user_id, emoji: str):
-    """نفس الأزرار لكن مع إبراز الإيموجي اللي الأونر اختاره"""
-    uid            = str(user_id)
-    is_user_vip    = uid in data["vip_users"]
-    is_user_banned = uid in data["banned"]
-    user_name      = data["users"].get(uid, {}).get("name", "مجهول")
-
-    badge = " ⭐" if is_user_vip else (" 🚫" if is_user_banned else "")
-    row0 = [btn(f"👤 {user_name}{badge}", f"user_{user_id}", "primary")]
-
-    row1 = [
-        btn("↩️ رد", f"reply_{user_id}", "primary"),
-        btn(
-            "✅ فك حظر" if is_user_banned else "🚫 حظر",
-            f"unban_{user_id}" if is_user_banned else f"ban_{user_id}",
-            "primary" if is_user_banned else "danger",
-        ),
-    ]
-
-    EMOJIS = ["❤️", "👍", "😂", "🔥", "👏"]
-    row_reactions = []
-    for em in EMOJIS:
-        label = f"✅{em}" if em == emoji else em
-        row_reactions.append(InlineKeyboardButton(label, callback_data=f"react_{user_id}_{em}"))
-
-    rows = [row0, row1, row_reactions]
+    rows = [row0, row1]
 
     quick_btns = []
     for title in list(data["quick_replies"].keys())[:3]:
@@ -419,103 +377,51 @@ def confirm_menu(action, cancel_to="main"):
 
 print("✅ تم تحميل keyboards.py V5.0")
 
-# ═══════════════════════════════════════════════════════════════
-#              🟢 أزرار الروابط (تظهر للمستخدم في الترحيب)
-# ═══════════════════════════════════════════════════════════════
-
-def _build_entities(text: str, entities_data: list):
-    """يبني قائمة MessageEntity من البيانات المحفوظة"""
-    result = []
-    for e in (entities_data or []):
-        if e.get("type") == "custom_emoji":
-            result.append(MessageEntity(
-                type="custom_emoji",
-                offset=e["offset"],
-                length=e["length"],
-                custom_emoji_id=e["custom_emoji_id"],
-            ))
-    return result or None
-
-
-def welcome_links_btns():
-    """أزرار خضراء للروابط تظهر للمستخدم تحت رسالة الترحيب"""
-    links = data.get("links", {})
-    owner_link  = links.get("owner_account", "")
-    group_link  = links.get("doctor_fonts_group", "")
-    owner_label = links.get("owner_label", "👤 حساب المالك") or "👤 حساب المالك"
-    group_label = links.get("group_label", "👨‍💻 مجموعة دكتور خطوط") or "👨‍💻 مجموعة دكتور خطوط"
-
-    rows = []
-    if owner_link:
-        rows.append([InlineKeyboardButton(owner_label, url=owner_link)])
-    if group_link:
-        rows.append([InlineKeyboardButton(group_label, url=group_link)])
-
-    return InlineKeyboardMarkup(rows) if rows else None
-
 
 # ═══════════════════════════════════════════════════════════════
-#              ⚙️ إدارة الروابط (صفحة الأدمن)
+#           🟢 الأزرار الدائمة (Reply Keyboard للمستخدم)
 # ═══════════════════════════════════════════════════════════════
 
-def links_settings_menu():
-    """قائمة إدارة الروابط في لوحة الأدمن"""
-    links = data.get("links", {})
-    owner_set = "✅" if links.get("owner_account") else "❌"
-    group_set = "✅" if links.get("doctor_fonts_group") else "❌"
-    return InlineKeyboardMarkup([
-        [btn(f"{owner_set} رابط حساب المالك",         "edit_owner_link",       "success")],
-        [btn("✏️ تعديل نص زر المالك",                  "edit_owner_label",      "primary")],
-        [btn(f"{group_set} رابط مجموعة دكتور خطوط",   "edit_group_link",       "success")],
-        [btn("✏️ تعديل نص زر المجموعة",                "edit_group_label",      "primary")],
-        [btn("🔙 رجوع", "settings", "primary")],
-    ])
-
-# ═══════════════════════════════════════════════════════════════
-#        📋 القائمة الدائمة للمستخدم (Reply Keyboard)
-# ═══════════════════════════════════════════════════════════════
-
-def user_reply_keyboard():
-    """
-    ينشئ ReplyKeyboard دائمة من أزرار menu_buttons المحفوظة.
-    إذا لا توجد أزرار يُعيد None.
-    الأزرار تُوزَّع صفَّين صفَّين.
-    """
-    buttons = data.get("menu_buttons", [])
+def persistent_kb():
+    """Reply keyboard دائم يظهر للمستخدم — يتم تكوينه من لوحة الأدمن."""
+    buttons = data.get("persistent_buttons", [])
     if not buttons:
-        return None
-    rows = []
-    row = []
-    for i, btn_data in enumerate(buttons):
-        row.append(KeyboardButton(btn_data["text"]))
+        return ReplyKeyboardRemove()
+    rows, row = [], []
+    for b in buttons:
+        label = b.get("label", "زر")
+        # روابط URL → web_app يفتح داخل تيليجرام (يظهر بمؤشر مميز)
+        if b.get("type") == "url" and b.get("value", "").startswith(("https://",)):
+            row.append(KeyboardButton(label, web_app=WebAppInfo(url=b["value"])))
+        else:
+            row.append(KeyboardButton(label))
         if len(row) == 2:
-            rows.append(row)
-            row = []
+            rows.append(row); row = []
     if row:
         rows.append(row)
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
+    return ReplyKeyboardMarkup(
+        rows,
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="اختر زراً أو اكتب رسالتك...",
+    )
 
+def pbuttons_menu():
+    btns = []
+    for i, b in enumerate(data.get("persistent_buttons", [])):
+        icon = "🔗" if b.get("type") == "url" else "💬"
+        btns.append([btn(f"{icon} {b.get('label','')[:25]}", f"pbtn_view_{i}", "primary")])
+    if not btns:
+        btns.append([btn("📭 لا توجد أزرار بعد", "none")])
+    btns.append([btn("➕ إضافة زر نص", "pbtn_add_text", "primary")])
+    btns.append([btn("🔗 إضافة زر رابط", "pbtn_add_url", "primary")])
+    if data.get("persistent_buttons"):
+        btns.append([btn("🗑️ حذف الكل", "pbtn_clear_all", "danger")])
+    btns.append([btn("🔙 رجوع", "main", "primary")])
+    return InlineKeyboardMarkup(btns)
 
-def remove_reply_keyboard():
-    return ReplyKeyboardRemove()
-
-
-# ═══════════════════════════════════════════════════════════════
-#        ⚙️ إدارة أزرار القائمة الدائمة (صفحة الأدمن)
-# ═══════════════════════════════════════════════════════════════
-
-def menu_buttons_admin():
-    """قائمة إدارة الأزرار الدائمة في لوحة الأدمن"""
-    buttons = data.get("menu_buttons", [])
-    rows = []
-    for i, b in enumerate(buttons):
-        short = b["text"][:20]
-        rows.append([
-            btn(f"🔤 {short}", f"mb_noop_{i}", "primary"),
-            btn("🗑️", f"mb_del_{i}", "danger"),
-        ])
-    rows.append([btn("➕ إضافة زر", "mb_add", "success")])
-    if buttons:
-        rows.append([btn("🗑️ حذف الكل", "mb_clear", "danger")])
-    rows.append([btn("🔙 رجوع", "settings", "primary")])
-    return InlineKeyboardMarkup(rows)
+def pbtn_view_menu(idx):
+    return InlineKeyboardMarkup([
+        [btn("🗑️ حذف هذا الزر", f"pbtn_del_{idx}", "danger")],
+        [btn("🔙 رجوع", "pbuttons", "primary")],
+    ])

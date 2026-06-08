@@ -11,6 +11,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ChatMemberHandler,
+    MessageReactionHandler,
     ContextTypes,
     filters,
 )
@@ -32,6 +33,7 @@ from handlers import (
     button_handler,
     message_handler,
     my_chat_member_handler,
+    reaction_handler,
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -443,6 +445,7 @@ def main():
         document_handler
     ), group=0)
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, message_handler))
+    application.add_handler(MessageReactionHandler(reaction_handler))
     application.add_error_handler(error_handler)
 
     print("✅ البوت يعمل الآن")
