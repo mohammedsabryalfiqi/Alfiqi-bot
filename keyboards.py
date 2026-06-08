@@ -403,6 +403,7 @@ def persistent_kb():
         rows,
         resize_keyboard=True,
         is_persistent=True,
+        one_time_keyboard=False,
         input_field_placeholder="اختر زراً أو اكتب رسالتك...",
     )
 

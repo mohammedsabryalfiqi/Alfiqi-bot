@@ -564,7 +564,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cb == "start_chat":
         await query.answer()
-        await query.message.reply_text("📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً ")
+        kb = persistent_kb()
+        if data.get("persistent_buttons"):
+            await query.message.reply_text("📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً ", reply_markup=kb)
+        else:
+            await query.message.reply_text("📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً ")
         return
 
     if cb == "users_list":
@@ -1593,13 +1597,25 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 emoji_raw = text.strip()[2:].strip()
                 if emoji_raw and target_msg_id:
                     try:
-                        # ── تفاعل عادي فقط على رسالة المستخدم (بدون إيموجيات مدفوعة) ──
+                        # ── إيموجي مميز بريميوم {N} أو {N|P} → custom_emoji_id ──
                         if emoji_raw.startswith("{") and emoji_raw.endswith("}"):
-                            await msg.reply_text(
-                                "⚠️ **التفاعلات المميزة المدفوعة غير مفعّلة**\n"
-                                "💡 استخدم: `ص 🫡` أو أي إيموجي عادي",
-                                parse_mode=ParseMode.MARKDOWN
-                            )
+                            emoji_item = await resolve_custom_emoji(context.bot, emoji_raw)
+                            if emoji_item is None:
+                                await msg.reply_text(
+                                    "⚠️ **لم يُعثر على الإيموجي**\n"
+                                    "💡 تأكد أنك أضفت الحزمة أولاً بـ: `حزمة رابط_الحزمة`\n"
+                                    "📌 ثم استخدم: `ص {1}` أو `ص {1|2}`",
+                                    parse_mode=ParseMode.MARKDOWN
+                                )
+                            else:
+                                reaction = [ReactionTypeCustomEmoji(emoji_item["id"])]
+                                await context.bot.set_message_reaction(
+                                    chat_id=int(target_id),
+                                    message_id=int(target_msg_id),
+                                    reaction=reaction,
+                                    is_big=False
+                                )
+                                await msg.delete()
                         else:
                             # ── إيموجي عادي → تفاعل على رسالة المستخدم ──
                             reaction = [ReactionTypeEmoji(emoji_raw)]
