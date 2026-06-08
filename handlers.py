@@ -109,6 +109,89 @@ async def resolve_custom_emoji(bot, token: str):
         return {"id": item, "fid": None}
     return item
 
+import re as _re
+
+def render_custom_emoji_message(text: str):
+    """
+    يحوّل نصاً يحتوي على {EMOJI_ID} إلى (نص_نظيف, قائمة_entities).
+    
+    مثال الاستخدام:
+        مرحبا {5368324456789} كيف حالك {9876543210} ؟
+    
+    كل {ID} يتحوّل إلى:
+      • حرف placeholder (نقطة ● غير مرئية) في النص
+      • MessageEntity من نوع custom_emoji على موضع ذلك الحرف
+    
+    يُعيد (clean_text, entities) لاستخدامهما في:
+        bot.send_message(text=clean_text, entities=entities)
+    
+    ملاحظة: لا يتوافق مع parse_mode — لا تمررهما معاً.
+    """
+    PLACEHOLDER = "\U0001F4A0"  # 💠 حرف مرئي بحجم إيموجي (1 UTF-16 codeunit)
+    pattern = _re.compile(r'\{(\d{10,})\}')
+    
+    entities = []
+    result = []
+    offset = 0  # بالـ UTF-16 code units كما تتوقع تيليجرام
+    
+    last_end = 0
+    for m in pattern.finditer(text):
+        # الجزء قبل الـ token
+        prefix = text[last_end:m.start()]
+        # احسب UTF-16 length للـ prefix
+        prefix_utf16_len = len(prefix.encode('utf-16-le')) // 2
+        result.append(prefix)
+        offset += prefix_utf16_len
+        
+        # أضف الـ placeholder
+        result.append(PLACEHOLDER)
+        placeholder_utf16_len = len(PLACEHOLDER.encode('utf-16-le')) // 2
+        
+        emoji_id = m.group(1)
+        entities.append(
+            MessageEntity(
+                type=MessageEntityType.CUSTOM_EMOJI,
+                offset=offset,
+                length=placeholder_utf16_len,
+                custom_emoji_id=emoji_id,
+            )
+        )
+        offset += placeholder_utf16_len
+        last_end = m.end()
+    
+    # الجزء المتبقي بعد آخر token
+    result.append(text[last_end:])
+    
+    clean_text = "".join(result)
+    return clean_text, entities if entities else None
+
+
+async def send_with_custom_emoji(bot_or_msg, text: str, chat_id=None, **kwargs):
+    """
+    دالة مساعدة ترسل رسالة مع دعم {EMOJI_ID}.
+    
+    استخدام مع update.message:
+        await send_with_custom_emoji(update.message, "مرحبا {5368324456789}")
+    
+    استخدام مع context.bot:
+        await send_with_custom_emoji(context.bot, "مرحبا {5368324456789}", chat_id=uid)
+    """
+    from telegram import Message, Bot
+    clean_text, entities = render_custom_emoji_message(text)
+    
+    # إزالة parse_mode لأنه لا يتوافق مع entities مخصصة
+    kwargs.pop("parse_mode", None)
+    
+    if entities:
+        kwargs["entities"] = entities
+    
+    if isinstance(bot_or_msg, Message):
+        return await bot_or_msg.reply_text(clean_text, **kwargs)
+    else:
+        # bot object — يجب تمرير chat_id
+        return await bot_or_msg.send_message(chat_id=chat_id, text=clean_text, **kwargs)
+
+
 from keyboards import (
     persistent_kb, pbuttons_menu, pbtn_view_menu,
     back_btn, cancel_btn, main_menu,
@@ -189,7 +272,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # محظور
     if is_banned(user.id):
-        await update.message.reply_text(data["messages"]["banned"])
+        await send_with_custom_emoji(update.message, data["messages"]["banned"])
         return
 
     # المالك
@@ -241,10 +324,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "returned_after_block",
             "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
         ).replace("{name}", user.first_name or "عزيزي")
-        await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN)
+        await send_with_custom_emoji(update.message, welcome)
         if data["status"]["is_away"]:
             await asyncio.sleep(1)
-            await update.message.reply_text(data["messages"]["away"])
+            await send_with_custom_emoji(update.message, data["messages"]["away"])
         return
 
     # مستخدم عادي
@@ -262,18 +345,27 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
     ]])
 
+    clean_welcome, welcome_entities = render_custom_emoji_message(welcome)
     if media_file_id and media_type == "photo":
-        await update.message.reply_photo(
-            photo=media_file_id,
-            caption=welcome,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=view_btn
-        )
+        if welcome_entities:
+            await update.message.reply_photo(
+                photo=media_file_id,
+                caption=clean_welcome,
+                caption_entities=welcome_entities,
+                reply_markup=view_btn
+            )
+        else:
+            await update.message.reply_photo(
+                photo=media_file_id,
+                caption=welcome,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=view_btn
+            )
     elif media_file_id and media_type == "sticker":
         await update.message.reply_sticker(sticker=media_file_id)
-        await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN, reply_markup=view_btn)
+        await send_with_custom_emoji(update.message, welcome, reply_markup=view_btn)
     else:
-        await update.message.reply_text(welcome, parse_mode=ParseMode.MARKDOWN)
+        await send_with_custom_emoji(update.message, welcome, reply_markup=view_btn)
 
     # 🟢 الأزرار الدائمة للمستخدم
     try:
@@ -286,7 +378,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # رسالة الغياب
     if data["status"]["is_away"]:
         await asyncio.sleep(1)
-        await update.message.reply_text(data["messages"]["away"])
+        await send_with_custom_emoji(update.message, data["messages"]["away"])
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -983,7 +1075,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         content = data["quick_replies"].get(title, "")
         if content:
             try:
-                await context.bot.send_message(int(uid), content)
+                clean_content, content_entities = render_custom_emoji_message(content)
+                await context.bot.send_message(
+                    int(uid), clean_content,
+                    entities=content_entities if content_entities else None
+                )
                 update_stats("sent")
                 await query.answer("✅ تم الإرسال", show_alert=True)
             except Exception as e:
@@ -1007,21 +1103,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if cb == "guide_reactions":
-        text = ("😀 **التفاعلات**\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        text = ("😀 **التفاعلات والإيموجيات المميزة**\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 "**تفاعل عادي على رسالة المستخدم:**\n"
                 "Reply + `ص 😂` → يضع تفاعل إيموجي عادي\n"
                 "Reply + `ص 🫡` → تفاعل عسكري\n\n"
-                "**⭐️ إيموجي بريميوم في الرد:**\n"
-                "عند الرد النصي العادي، يُضاف تلقائياً\n"
-                "إيموجي بريميوم من الحزمة الأولى في أول الرسالة\n\n"
-                "**ملاحظة:** التفاعلات المدفوعة `{N}` غير مفعّلة\n"
-                "استخدم `ص` + إيموجي عادي فقط\n\n"
-                "**إدارة الحزم:**\n"
+                "**⭐️ تفاعل بريميوم مميز:**\n"
+                "Reply + `ص {N}` → الإيموجي N من الحزمة 1\n"
+                "Reply + `ص {N|P}` → الإيموجي N من الحزمة P\n\n"
+                "**⭐️ إيموجي مميز داخل الرسائل:**\n"
+                "ضع `{ID_الإيموجي}` في أي رسالة تكتبها:\n"
+                "مثال: `مرحبا {5368324456789} كيف حالك؟`\n"
+                "يعمل في: رسالة الترحيب، الغياب، الاستلام،\n"
+                "الردود الذكية، الردود الجاهزة، الأزرار الدائمة\n\n"
+                "**كيف أحصل على ID الإيموجي؟**\n"
+                "• افتح @stickers وابحث عن الإيموجي\n"
+                "• أو أرسله للبوت @fStikBot\n\n"
+                "**إدارة الحزم (للتفاعلات):**\n"
                 "• `حزمة رابط` → إضافة حزمة\n"
-                "• `حزم` → عرض الحزم\n"
                 "• `استعراض` → عرض كل الإيموجيات بأرقامها\n"
-                "• `حذف حزمة N` → حذف\n"
-                "• `تحديث حزمة N` → تحديث")
+                "• `حذف حزمة N` → حذف")
         await query.edit_message_text(text, reply_markup=back_btn("guide"), parse_mode=ParseMode.MARKDOWN)
         return
 
@@ -1358,7 +1458,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             reply_markup=_IKM([[_IKB("🔗 فتح الرابط", url=val)]])
                         )
                     else:
-                        await msg.reply_text(val or pb.get("label", ""))
+                        await send_with_custom_emoji(msg, val or pb.get("label", ""))
                     return
 
         if uid in data["users"]:
@@ -1387,7 +1487,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if msg.text:
             smart = get_smart_reply(msg.text)
             if smart:
-                await msg.reply_text(smart)
+                await send_with_custom_emoji(msg, smart)
 
         try:
             user_name  = data["users"].get(uid, {}).get("name", "مجهول")
@@ -1421,7 +1521,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if data["status"]["is_away"]:
                 await asyncio.sleep(1)
-                await msg.reply_text(data["messages"]["away"])
+                await send_with_custom_emoji(msg, data["messages"]["away"])
             else:
                 # ✅ رسالة "تم استقبال رسالتكم" — احذف القديمة وأرسل جديدة كرد على آخر رسالة
                 try:
@@ -1431,8 +1531,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             await context.bot.delete_message(chat_id=int(uid), message_id=int(old_rcv_id))
                         except Exception:
                             pass
+                    rcv_text = data["messages"].get("received", "✅ تم استقبال رسالتكم")
+                    clean_rcv, rcv_entities = render_custom_emoji_message(rcv_text)
                     sent_rcv = await msg.reply_text(
-                        data["messages"].get("received", "✅ تم استقبال رسالتكم"),
+                        clean_rcv,
+                        entities=rcv_entities if rcv_entities else None,
                         reply_to_message_id=msg.message_id,
                     )
                     data.setdefault("received_msgs", {})[uid] = sent_rcv.message_id
