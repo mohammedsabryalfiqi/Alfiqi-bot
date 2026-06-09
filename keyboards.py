@@ -415,37 +415,44 @@ print("✅ تم تحميل keyboards.py V5.0")
 
 
 # ═══════════════════════════════════════════════════════════════
-#           🟢 الأزرار الدائمة (Reply Keyboard للمستخدم)
+#    🟢 الأزرار الدائمة — InlineKeyboard ملصق برسالة الترحيب
 # ═══════════════════════════════════════════════════════════════
 
 def persistent_kb():
     """
-    Reply keyboard دائم يظهر للمستخدم — يتم تكوينه من لوحة الأدمن.
-    يدعم {EMOJI_ID} في label الزر لعرض الإيموجيات المميزة البريميوم.
-    
-    ملاحظة: جميع الأزرار نصية بغض النظر عن نوعها (text/url) —
-    لأن ReplyKeyboard لا يدعم روابط مباشرة. أزرار URL تُرسل كـ
-    InlineKeyboard عند الضغط عليها.
+    InlineKeyboard ملصق برسالة الترحيب مباشرةً (مثل الصورة المرجعية).
+    - أزرار النص  → callback_data="pbtn_text_{i}" بستايل primary (أخضر)
+    - أزرار الرابط → url= مباشرةً (يفتح المتصفح)
+    - يدعم {EMOJI_ID} في الـ label
+
+    يعيد None إذا لا توجد أزرار.
     """
     buttons = data.get("persistent_buttons", [])
     if not buttons:
-        return ReplyKeyboardRemove()
-    rows, row = [], []
-    for b in buttons:
-        raw_label = b.get("label", "زر")
-        clean_label, _ = resolve_button_label(raw_label)
-        row.append(KeyboardButton(clean_label))   # دائماً نصي — URL تُعالَج عند الضغط
+        return None
+
+    rows = []
+    row  = []
+    for i, b in enumerate(buttons):
+        raw_label   = b.get("label", "زر")
+        clean_label, _ = resolve_button_label(raw_label)   # {ID} → placeholder
+
+        if b.get("type") == "url":
+            val = b.get("value", "")
+            row.append(InlineKeyboardButton(clean_label, url=val))
+        else:
+            row.append(InlineKeyboardButton(
+                clean_label,
+                callback_data=f"pbtn_text_{i}",
+            ))
+
         if len(row) == 2:
             rows.append(row); row = []
     if row:
         rows.append(row)
-    return ReplyKeyboardMarkup(
-        rows,
-        resize_keyboard=True,
-        is_persistent=True,
-        one_time_keyboard=False,
-        input_field_placeholder="اختر زراً أو اكتب رسالتك...",
-    )
+
+    return InlineKeyboardMarkup(rows)
+
 
 def pbuttons_menu():
     btns = []

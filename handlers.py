@@ -318,16 +318,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "returned_after_block",
             "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
         ).replace("{name}", user.first_name or "عزيزي")
-        has_kb = bool(data.get("persistent_buttons"))
-        kb = persistent_kb() if has_kb else None
         from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-        inline_btn = InlineKeyboardMarkup([[
+        kb = persistent_kb()
+        welcome_markup = kb if kb else InlineKeyboardMarkup([[
             InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
         ]])
-        if has_kb:
-            await send_with_custom_emoji(update.message, welcome, reply_markup=kb)
-        else:
-            await send_with_custom_emoji(update.message, welcome, reply_markup=inline_btn)
+        await send_with_custom_emoji(update.message, welcome, reply_markup=welcome_markup)
         if data["status"]["is_away"]:
             await asyncio.sleep(1)
             await send_with_custom_emoji(update.message, data["messages"]["away"])
@@ -343,41 +339,27 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media_file_id = welcome_media.get("file_id")
     media_type    = welcome_media.get("type")
 
-    has_kb = bool(data.get("persistent_buttons"))
-    kb = persistent_kb() if has_kb else None
-
     from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-    inline_btn = InlineKeyboardMarkup([[
+    # الكيبورد: الأزرار الدائمة أو زر "أرسل رسالتك" احتياطياً
+    kb = persistent_kb()
+    welcome_markup = kb if kb else InlineKeyboardMarkup([[
         InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
     ]])
 
     clean_welcome, welcome_entities = render_custom_emoji_message(welcome)
 
     if media_file_id and media_type == "photo":
-        # الصورة لا تقبل ReplyKeyboard — نرسلها بـ inline ثم الكيبورد برسالة منفصلة
         if welcome_entities:
             await update.message.reply_photo(photo=media_file_id, caption=clean_welcome,
-                caption_entities=welcome_entities, reply_markup=inline_btn)
+                caption_entities=welcome_entities, reply_markup=welcome_markup)
         else:
             await update.message.reply_photo(photo=media_file_id, caption=welcome,
-                parse_mode=ParseMode.MARKDOWN, reply_markup=inline_btn)
-        if has_kb:
-            await update.message.reply_text("⬇️ القائمة:", reply_markup=kb)
-
+                parse_mode=ParseMode.MARKDOWN, reply_markup=welcome_markup)
     elif media_file_id and media_type == "sticker":
         await update.message.reply_sticker(sticker=media_file_id)
-        # رسالة الترحيب + الكيبورد في نفس الرسالة
-        if has_kb:
-            await send_with_custom_emoji(update.message, welcome, reply_markup=kb)
-        else:
-            await send_with_custom_emoji(update.message, welcome, reply_markup=inline_btn)
-
+        await send_with_custom_emoji(update.message, welcome, reply_markup=welcome_markup)
     else:
-        # نص فقط — نرسل الكيبورد الدائم مباشرةً مع رسالة الترحيب
-        if has_kb:
-            await send_with_custom_emoji(update.message, welcome, reply_markup=kb)
-        else:
-            await send_with_custom_emoji(update.message, welcome, reply_markup=inline_btn)
+        await send_with_custom_emoji(update.message, welcome, reply_markup=welcome_markup)
 
     # رسالة الغياب
     if data["status"]["is_away"]:
@@ -660,14 +642,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cb == "start_chat":
         await query.answer()
-        has_kb = bool(data.get("persistent_buttons"))
-        if has_kb:
-            await query.message.reply_text(
-                "📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً",
-                reply_markup=persistent_kb()
-            )
-        else:
-            await query.message.reply_text("📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً")
+        kb = persistent_kb()
+        markup = kb if kb else None
+        await query.message.reply_text(
+            "📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً",
+            reply_markup=markup
+        )
+        return
+
+    # 🟢 ضغط زر نص دائم من قِبَل المستخدم
+    if cb.startswith("pbtn_text_"):
+        await query.answer()
+        try:
+            idx = int(cb.split("_")[-1])
+            pb  = data.get("persistent_buttons", [])[idx]
+            val = pb.get("value", "")
+            if val:
+                await send_with_custom_emoji(query.message, val)
+        except (IndexError, ValueError):
+            await query.answer("⚠️ الزر لم يُعثر عليه", show_alert=True)
         return
 
     if cb == "users_list":
@@ -1456,28 +1449,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # فحص الكتم - لو مكتوم نتجاهل الرسالة بصمت
         if uid in data.get("muted", []):
             return
-
-        # 🟢 اعتراض الأزرار الدائمة — لو النص بيطابق label لزر
-        if msg.text:
-            for pb in data.get("persistent_buttons", []):
-                # المقارنة بعد تحويل {EMOJI_ID} → placeholder
-                from keyboards import resolve_button_label as _rbl
-                clean_pb_label, _ = _rbl(pb.get("label", ""))
-                if msg.text.strip() == clean_pb_label.strip() or msg.text.strip() == pb.get("label", "").strip():
-                    val = pb.get("value", "")
-                    if pb.get("type") == "url":
-                        from telegram import InlineKeyboardButton as _IKB, InlineKeyboardMarkup as _IKM
-                        # تحقق من صحة الرابط
-                        if val.startswith(("https://", "http://")):
-                            await msg.reply_text(
-                                f"🔗 {pb.get('label', 'رابط')}",
-                                reply_markup=_IKM([[_IKB("🔗 فتح الرابط", url=val)]])
-                            )
-                        else:
-                            await msg.reply_text(f"🔗 {val}")
-                    else:
-                        await send_with_custom_emoji(msg, val or pb.get("label", ""))
-                    return
 
         if uid in data["users"]:
             data["users"][uid]["msg_count"] = data["users"][uid].get("msg_count", 0) + 1
