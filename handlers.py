@@ -193,7 +193,7 @@ async def send_with_custom_emoji(bot_or_msg, text: str, chat_id=None, **kwargs):
 
 
 from keyboards import (
-    persistent_kb, pbuttons_menu, pbtn_view_menu,
+    persistent_kb, persistent_inline_kb, pbuttons_menu, pbtn_view_menu,
     back_btn, cancel_btn, main_menu,
     stats_menu, admins_menu, admin_perms_menu, select_user_menu,
     settings_menu, msg_settings_menu, away_menu,
@@ -319,11 +319,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
         ).replace("{name}", user.first_name or "عزيزي")
         from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-        kb = persistent_kb()
-        welcome_markup = kb if kb else InlineKeyboardMarkup([[
+        has_btns = bool(data.get("persistent_buttons"))
+        fallback_btn = InlineKeyboardMarkup([[
             InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
         ]])
-        await send_with_custom_emoji(update.message, welcome, reply_markup=welcome_markup)
+        markup = None if has_btns else fallback_btn
+        await send_with_custom_emoji(update.message, welcome, reply_markup=markup)
+        if has_btns:
+            kb = persistent_kb()
+            if kb:
+                await update.message.reply_text("📋", reply_markup=kb)
         if data["status"]["is_away"]:
             await asyncio.sleep(1)
             await send_with_custom_emoji(update.message, data["messages"]["away"])
@@ -340,26 +345,35 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media_type    = welcome_media.get("type")
 
     from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-    # الكيبورد: الأزرار الدائمة أو زر "أرسل رسالتك" احتياطياً
-    kb = persistent_kb()
-    welcome_markup = kb if kb else InlineKeyboardMarkup([[
+    has_btns = bool(data.get("persistent_buttons"))
+    # رسالة الترحيب تحمل زر "أرسل رسالتك" فقط إذا لا توجد أزرار دائمة
+    fallback_btn = InlineKeyboardMarkup([[
         InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
     ]])
 
     clean_welcome, welcome_entities = render_custom_emoji_message(welcome)
 
     if media_file_id and media_type == "photo":
+        markup = None if has_btns else fallback_btn
         if welcome_entities:
             await update.message.reply_photo(photo=media_file_id, caption=clean_welcome,
-                caption_entities=welcome_entities, reply_markup=welcome_markup)
+                caption_entities=welcome_entities, reply_markup=markup)
         else:
             await update.message.reply_photo(photo=media_file_id, caption=welcome,
-                parse_mode=ParseMode.MARKDOWN, reply_markup=welcome_markup)
+                parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
     elif media_file_id and media_type == "sticker":
         await update.message.reply_sticker(sticker=media_file_id)
-        await send_with_custom_emoji(update.message, welcome, reply_markup=welcome_markup)
+        markup = None if has_btns else fallback_btn
+        await send_with_custom_emoji(update.message, welcome, reply_markup=markup)
     else:
-        await send_with_custom_emoji(update.message, welcome, reply_markup=welcome_markup)
+        markup = None if has_btns else fallback_btn
+        await send_with_custom_emoji(update.message, welcome, reply_markup=markup)
+
+    # 🟢 الأزرار الدائمة — ReplyKeyboard الأخضر في رسالة منفصلة
+    if has_btns:
+        kb = persistent_kb()
+        if kb:
+            await update.message.reply_text("📋", reply_markup=kb)
 
     # رسالة الغياب
     if data["status"]["is_away"]:
@@ -642,12 +656,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cb == "start_chat":
         await query.answer()
-        kb = persistent_kb()
-        markup = kb if kb else None
-        await query.message.reply_text(
-            "📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً",
-            reply_markup=markup
-        )
+        has_btns = bool(data.get("persistent_buttons"))
+        if has_btns:
+            kb = persistent_kb()
+            await query.message.reply_text("📋", reply_markup=kb)
+        else:
+            await query.message.reply_text("📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً")
         return
 
     # 🟢 ضغط زر نص دائم من قِبَل المستخدم
@@ -1105,23 +1119,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cb == "guide_reactions":
         text = ("😀 **التفاعلات والإيموجيات المميزة**\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 "**تفاعل عادي على رسالة المستخدم:**\n"
-                "Reply + `ص 😂` → يضع تفاعل إيموجي عادي\n"
-                "Reply + `ص 🫡` → تفاعل عسكري\n\n"
+                "Reply + `ص 😂` ← إيموجي عادي من قائمة تيليجرام\n\n"
                 "**⭐️ تفاعل بريميوم مميز:**\n"
-                "Reply + `ص {N}` → الإيموجي N من الحزمة 1\n"
-                "Reply + `ص {N|P}` → الإيموجي N من الحزمة P\n\n"
-                "**⭐️ إيموجي مميز داخل الرسائل:**\n"
-                "ضع `{ID_الإيموجي}` في أي رسالة تكتبها:\n"
-                "مثال: `مرحبا {5368324456789} كيف حالك؟`\n"
+                "Reply + `ص {ID}` ← إيموجي مميز خارج قائمة تيليجرام\n"
+                "مثال: `ص {5368324456789}`\n\n"
+                "**⭐️ إيموجي مميز داخل الرسائل والأزرار:**\n"
+                "ضع `{ID}` في أي نص تكتبه:\n"
+                "مثال: `{5368324456789} مرحبا`\n"
                 "يعمل في: رسالة الترحيب، الغياب، الاستلام،\n"
-                "الردود الذكية، الردود الجاهزة، الأزرار الدائمة\n\n"
+                "الردود الذكية، الردود الجاهزة، أسماء الأزرار\n\n"
                 "**كيف أحصل على ID الإيموجي؟**\n"
-                "• افتح @stickers وابحث عن الإيموجي\n"
-                "• أو أرسله للبوت @fStikBot\n\n"
-                "**إدارة الحزم (للتفاعلات):**\n"
-                "• `حزمة رابط` → إضافة حزمة\n"
-                "• `استعراض` → عرض كل الإيموجيات بأرقامها\n"
-                "• `حذف حزمة N` → حذف")
+                "• ابعت الإيموجي المميز لـ @JsonDumpBot\n"
+                "• أو @getidsbot ← ابحث عن `custom_emoji_id`")
         await query.edit_message_text(text, reply_markup=back_btn("guide"), parse_mode=ParseMode.MARKDOWN)
         return
 
@@ -1689,18 +1698,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 emoji_raw = text.strip()[2:].strip()
                 if emoji_raw and target_msg_id:
                     try:
-                        # ── إيموجي مميز بريميوم {N} أو {N|P} → custom_emoji_id ──
+                        # ── إيموجي مميز بريميوم: ص {ID} ──
                         if emoji_raw.startswith("{") and emoji_raw.endswith("}"):
-                            emoji_item = await resolve_custom_emoji(context.bot, emoji_raw)
-                            if emoji_item is None:
-                                await msg.reply_text(
-                                    "⚠️ **لم يُعثر على الإيموجي**\n"
-                                    "💡 تأكد أنك أضفت الحزمة أولاً بـ: `حزمة رابط_الحزمة`\n"
-                                    "📌 ثم استخدم: `ص {1}` أو `ص {1|2}`",
-                                    parse_mode=ParseMode.MARKDOWN
-                                )
-                            else:
-                                reaction = [ReactionTypeCustomEmoji(emoji_item["id"])]
+                            custom_id = emoji_raw[1:-1].strip()
+                            if custom_id.isdigit():
+                                reaction = [ReactionTypeCustomEmoji(custom_id)]
                                 await context.bot.set_message_reaction(
                                     chat_id=int(target_id),
                                     message_id=int(target_msg_id),
@@ -1708,8 +1710,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     is_big=False
                                 )
                                 await msg.delete()
+                            else:
+                                await msg.reply_text(
+                                    "⚠️ **صيغة خاطئة**\n"
+                                    "💡 استخدم: `ص {ID_الإيموجي_المميز}`\n"
+                                    "📌 مثال: `ص {5368324456789}`",
+                                    parse_mode=ParseMode.MARKDOWN
+                                )
                         else:
-                            # ── إيموجي عادي → تفاعل على رسالة المستخدم ──
+                            # ── إيموجي عادي ──
                             reaction = [ReactionTypeEmoji(emoji_raw)]
                             await context.bot.set_message_reaction(
                                 chat_id=int(target_id),
@@ -1800,152 +1809,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await msg.reply_text("✅ تم!")
                 except Exception as e:
                     await msg.reply_text(f"❌ {e}")
-            return
-
-        # ── إدارة حزم الإيموجيات المميزة ──
-        # إضافة حزمة: "حزمة رابط"
-        if text.startswith("حزمة ") and len(text.split()) >= 2:
-            link = text.split(" ", 1)[1].strip()
-            if not data.get("emoji_packs"):
-                data["emoji_packs"] = []
-            # فحص التكرار
-            existing = [p["link"] for p in data["emoji_packs"]]
-            if link in existing:
-                pack_num = existing.index(link) + 1
-                await msg.reply_text(
-                    f"⚠️ الحزمة موجودة بالفعل برقم **{pack_num}**",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            # جلب الإيموجيات
-            status = await msg.reply_text("⏳ جاري جلب الحزمة...")
-            ids = await get_pack_sticker_ids(context.bot, link)
-            if not ids:
-                await status.edit_text(
-                    "❌ **فشل جلب الحزمة**\n"
-                    "💡 تأكد أن الرابط صحيح وأن الحزمة تحتوي على إيموجيات مميزة\n"
-                    "📌 مثال: `https://t.me/addemoji/PackName`",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            data["emoji_packs"].append({"link": link, "ids": ids})
-            save_data()
-            pack_num = len(data["emoji_packs"])
-            await status.edit_text(
-                f"✅ **تم إضافة الحزمة رقم {pack_num}**\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📦 الرابط: `{link}`\n"
-                f"🎭 عدد الإيموجيات: **{len(ids)}**\n\n"
-                f"💡 **طريقة الاستخدام:**\n"
-                f"• Reply + `ص {{1}}` → الإيموجي الأول من الحزمة 1\n"
-                f"• Reply + `ص {{3|{pack_num}}}` → الإيموجي الثالث من الحزمة {pack_num}",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
-
-        # ── استعراض: عرض كل إيموجيات الحزم مع أرقامها ──
-        if text.strip() == "استعراض":
-            packs = data.get("emoji_packs", [])
-
-            # ── أولاً: التفاعلات العادية ──
-            VALID_TELEGRAM_REACTIONS = [
-                "👍","👎","❤","🔥","🥰","👏","😁","🤔","🤯","😱",
-                "🤬","😢","🎉","🤩","🤮","💩","🙏","👌","🕊","🤡",
-                "🥱","🥴","😍","🐳","❤‍🔥","🌚","🌭","💯","🤣","⚡",
-                "🍌","🏆","💔","🤨","😐","🍓","🍾","💋","🖕","😈",
-                "😴","😭","🤓","👻","👨‍💻","👀","🎃","🙈","😇","😨",
-                "🤝","✍","🤗","🫡","🎅","🎄","☃","💅","🤪","🗿",
-                "🆒","💘","🙉","🦄","😘","💊","🙊","😎","👾","🤷‍♂",
-                "🤷","🤷‍♀","😡"
-            ]
-            lines = ["🎭 **استعراض الإيموجيات**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"]
-            lines.append("**✅ التفاعلات العادية المدعومة:**\n")
-            lines.append("💡 الاستخدام: `ص إيموجي` (Reply)\n\n")
-            row = []
-            for i, em in enumerate(VALID_TELEGRAM_REACTIONS, 1):
-                row.append(f"`{i}.`{em}")
-                if len(row) == 5:
-                    lines.append("  ".join(row) + "\n")
-                    row = []
-            if row:
-                lines.append("  ".join(row) + "\n")
-
-            # ── ثانياً: حزم الإيموجيات المميزة ──
-            if packs:
-                lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━\n")
-                lines.append("**📦 حزم الإيموجيات المميزة:**\n")
-                lines.append("💡 الاستخدام: `ص {رقم_الإيموجي|رقم_الحزمة}` (Reply)\n")
-                for pi, pack in enumerate(packs, 1):
-                    count = len(pack.get("ids", []))
-                    lines.append(f"\n**📦 حزمة {pi}** — `{pack['link']}`\n")
-                    lines.append(f"🎭 تحتوي على **{count}** إيموجي\n")
-                    lines.append(f"💡 مثال: `ص {{1|{pi}}}` إلى `ص {{{count}|{pi}}}`\n")
-            else:
-                lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━\n")
-                lines.append("📦 **لا توجد حزم مميزة محفوظة**\n")
-                lines.append("💡 أضف حزمة بـ: `حزمة https://t.me/addemoji/PackName`\n")
-
-            lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━")
-            await msg.reply_text("".join(lines), parse_mode=ParseMode.MARKDOWN)
-            return
-
-        # عرض الحزم: "حزم"
-        if text.strip() == "حزم":
-            packs = data.get("emoji_packs", [])
-            if not packs:
-                await msg.reply_text(
-                    "📦 **لا توجد حزم محفوظة**\n\n"
-                    "💡 لإضافة حزمة:\n`حزمة https://t.me/addemoji/PackName`",
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            lines = ["📦 **الحزم المحفوظة:**\n━━━━━━━━━━━━━━━━━━━━━━━━"]
-            for i, p in enumerate(packs, 1):
-                count = len(p.get("ids", []))
-                lines.append(f"**{i}.** `{p['link']}`\n    🎭 {count} إيموجي")
-            lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━")
-            lines.append("💡 `حذف حزمة N` لحذف حزمة\n💡 `تحديث حزمة N` لإعادة جلبها")
-            await msg.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
-            return
-
-        # حذف حزمة: "حذف حزمة N"
-        if text.startswith("حذف حزمة "):
-            num_str = text[9:].strip()
-            if num_str.isdigit():
-                num = int(num_str)
-                packs = data.get("emoji_packs", [])
-                if 1 <= num <= len(packs):
-                    removed = packs.pop(num - 1)
-                    save_data()
-                    await msg.reply_text(
-                        f"🗑️ تم حذف الحزمة رقم **{num}**\n`{removed['link']}`\n\n"
-                        f"📦 الحزم المتبقية: **{len(packs)}**",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                else:
-                    await msg.reply_text(f"❌ رقم غير صحيح. الحزم المتاحة: 1 - {len(packs)}")
-            return
-
-        # تحديث حزمة (إعادة جلب): "تحديث حزمة N"
-        if text.startswith("تحديث حزمة "):
-            num_str = text[11:].strip()
-            if num_str.isdigit():
-                num = int(num_str)
-                packs = data.get("emoji_packs", [])
-                if 1 <= num <= len(packs):
-                    status = await msg.reply_text("⏳ جاري التحديث...")
-                    ids = await get_pack_sticker_ids(context.bot, packs[num - 1]["link"])
-                    if ids:
-                        packs[num - 1]["ids"] = ids
-                        save_data()
-                        await status.edit_text(
-                            f"✅ **تم تحديث الحزمة {num}**\n🎭 العدد: **{len(ids)}** إيموجي",
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-                    else:
-                        await status.edit_text("❌ فشل التحديث")
-                else:
-                    await msg.reply_text(f"❌ رقم غير صحيح")
             return
 
 print("✅ تم تحميل handlers.py V4.2")

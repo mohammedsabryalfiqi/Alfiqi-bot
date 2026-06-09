@@ -327,7 +327,6 @@ async def post_init(application: Application):
     # ── 3. أوامر القائمة ──
     user_cmds = [
         BotCommand('start', '🚀 بدء البوت'),
-        BotCommand('help', '📖 المساعدة'),
     ]
     owner_cmds = user_cmds + [
         BotCommand('stats',   '📊 الإحصائيات'),

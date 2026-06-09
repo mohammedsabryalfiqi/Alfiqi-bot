@@ -415,37 +415,62 @@ print("✅ تم تحميل keyboards.py V5.0")
 
 
 # ═══════════════════════════════════════════════════════════════
-#    🟢 الأزرار الدائمة — InlineKeyboard ملصق برسالة الترحيب
+#    🟢 الأزرار الدائمة — ReplyKeyboard (الأزرار الخضراء الحقيقية)
 # ═══════════════════════════════════════════════════════════════
 
 def persistent_kb():
     """
-    InlineKeyboard ملصق برسالة الترحيب مباشرةً (مثل الصورة المرجعية).
-    - أزرار النص  → callback_data="pbtn_text_{i}" بستايل primary (أخضر)
-    - أزرار الرابط → url= مباشرةً (يفتح المتصفح)
-    - يدعم {EMOJI_ID} في الـ label
-
+    ReplyKeyboard دائم يظهر بالستايل الأخضر تحت رسالة الترحيب.
+    - {EMOJI_ID} في label يُحوَّل إلى placeholder مرئي (تيليجرام يعرض الإيموجي المميز)
+    - أزرار URL تُعالَج كأزرار نص عادية (الرابط يُرسل عند الضغط كـ inline button)
+    - لا يُستخدم WebAppInfo لتفادي button_url_invalid
     يعيد None إذا لا توجد أزرار.
     """
     buttons = data.get("persistent_buttons", [])
     if not buttons:
         return None
 
-    rows = []
-    row  = []
-    for i, b in enumerate(buttons):
-        raw_label   = b.get("label", "زر")
-        clean_label, _ = resolve_button_label(raw_label)   # {ID} → placeholder
+    rows, row = [], []
+    for b in buttons:
+        raw_label = b.get("label", "زر")
+        clean_label, _ = resolve_button_label(raw_label)
+        row.append(KeyboardButton(clean_label))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
 
+    return ReplyKeyboardMarkup(
+        rows,
+        resize_keyboard=True,
+        is_persistent=True,
+        one_time_keyboard=False,
+        input_field_placeholder="اختر زراً أو اكتب رسالتك...",
+    )
+
+
+def persistent_inline_kb():
+    """
+    InlineKeyboard للأزرار الدائمة — يُستخدم ملصقاً برسالة الترحيب
+    ليظهر الأزرار تحتها مباشرةً بالإضافة إلى ReplyKeyboard الأخضر.
+    يعيد None إذا لا توجد أزرار.
+    """
+    buttons = data.get("persistent_buttons", [])
+    if not buttons:
+        return None
+
+    rows, row = [], []
+    for i, b in enumerate(buttons):
+        raw_label = b.get("label", "زر")
+        clean_label, _ = resolve_button_label(raw_label)
         if b.get("type") == "url":
             val = b.get("value", "")
-            row.append(InlineKeyboardButton(clean_label, url=val))
+            if val.startswith(("https://", "http://")):
+                row.append(InlineKeyboardButton(clean_label, url=val))
+            else:
+                row.append(InlineKeyboardButton(clean_label, callback_data=f"pbtn_text_{i}"))
         else:
-            row.append(InlineKeyboardButton(
-                clean_label,
-                callback_data=f"pbtn_text_{i}",
-            ))
-
+            row.append(InlineKeyboardButton(clean_label, callback_data=f"pbtn_text_{i}"))
         if len(row) == 2:
             rows.append(row); row = []
     if row:
