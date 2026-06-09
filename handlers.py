@@ -202,7 +202,7 @@ from keyboards import (
     banned_menu, vip_menu, broadcast_menu,
     search_menu, search_results_menu, guide_menu,
     incoming_msg_btns, user_info_menu, confirm_menu,
-    users_list_menu
+    users_list_menu, btn
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -318,10 +318,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "returned_after_block",
             "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
         ).replace("{name}", user.first_name or "عزيزي")
-        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-        prompt_text = data["messages"].get("send_prompt", "📩 أرسل رسالتك")
+        from telegram import InlineKeyboardMarkup
+        _raw_prompt = data["messages"].get("send_prompt", "📩 أرسل رسالتك")
         prompt_btn = InlineKeyboardMarkup([[
-            InlineKeyboardButton(prompt_text, callback_data="start_chat")
+            btn(_raw_prompt, "start_chat", "primary")
         ]])
         await send_with_custom_emoji(update.message, welcome, reply_markup=prompt_btn)
         if data["status"]["is_away"]:
@@ -339,12 +339,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media_file_id = welcome_media.get("file_id")
     media_type    = welcome_media.get("type")
 
-    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+    from telegram import InlineKeyboardMarkup
     has_btns = bool(data.get("persistent_buttons"))
     kb = persistent_kb() if has_btns else None
-    prompt_text = data["messages"].get("send_prompt", "📩 أرسل رسالتك")
+    _raw_prompt = data["messages"].get("send_prompt", "📩 أرسل رسالتك")
     prompt_btn = InlineKeyboardMarkup([[
-        InlineKeyboardButton(prompt_text, callback_data="start_chat")
+        btn(_raw_prompt, "start_chat", "primary")
     ]])
     # الزر الرئيسي: الأزرار الدائمة إن وُجدت، وإلا زر "أرسل رسالتك"
     main_markup = kb if has_btns else prompt_btn

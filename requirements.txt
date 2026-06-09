@@ -3,7 +3,7 @@
 # ═══════════════════════════════════════════════════
 
 # ── مكتبة تيليغرام الرئيسية (Bot API 9.x + Custom Emoji + Premium) ──
-python-telegram-bot[job-queue,rate-limiter]>=22.0,<23.0
+python-telegram-bot[job-queue,rate-limiter]>=22.7,<23.0
 
 # ── دعم الإيموجيات ──
 emoji>=2.14.0

@@ -45,9 +45,27 @@ def resolve_button_label(label: str):
     return clean, (entities if entities else None)
 
 def btn(text, callback_data, style=None):
+    """
+    ينشئ زر inline مع دعم:
+      - style: "primary"(أزرق) | "success"(أخضر) | "danger"(أحمر)
+      - {EMOJI_ID}: أول {ID} في النص يُستخرج ويُمرَّر كـ icon_custom_emoji_id
+                    والباقي يُحذف من label الزر
+    يتطلب python-telegram-bot>=22.7
+    """
+    icon_id = None
+    clean_text = text
+    m = _EMOJI_PATTERN.search(text)
+    if m:
+        icon_id = m.group(1)
+        clean_text = (_EMOJI_PATTERN.sub('', text)).strip()
+
+    kwargs = {"callback_data": callback_data}
     if style:
-        return InlineKeyboardButton(text, callback_data=callback_data, style=style)
-    return InlineKeyboardButton(text, callback_data=callback_data)
+        kwargs["style"] = style
+    if icon_id:
+        kwargs["icon_custom_emoji_id"] = icon_id
+
+    return InlineKeyboardButton(clean_text, **kwargs)
 
 # ═══════════════════════════════════════════════════════════════
 #                      🔙 أزرار التنقل
