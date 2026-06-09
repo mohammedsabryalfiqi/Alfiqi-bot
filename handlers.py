@@ -318,7 +318,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "returned_after_block",
             "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
         ).replace("{name}", user.first_name or "عزيزي")
-        await send_with_custom_emoji(update.message, welcome, reply_markup=None)
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+        prompt_text = data["messages"].get("send_prompt", "📩 أرسل رسالتك")
+        prompt_btn = InlineKeyboardMarkup([[
+            InlineKeyboardButton(prompt_text, callback_data="start_chat")
+        ]])
+        await send_with_custom_emoji(update.message, welcome, reply_markup=prompt_btn)
         if data["status"]["is_away"]:
             await asyncio.sleep(1)
             await send_with_custom_emoji(update.message, data["messages"]["away"])
@@ -337,25 +342,31 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from telegram import InlineKeyboardMarkup, InlineKeyboardButton
     has_btns = bool(data.get("persistent_buttons"))
     kb = persistent_kb() if has_btns else None
+    prompt_text = data["messages"].get("send_prompt", "📩 أرسل رسالتك")
+    prompt_btn = InlineKeyboardMarkup([[
+        InlineKeyboardButton(prompt_text, callback_data="start_chat")
+    ]])
+    # الزر الرئيسي: الأزرار الدائمة إن وُجدت، وإلا زر "أرسل رسالتك"
+    main_markup = kb if has_btns else prompt_btn
 
     clean_welcome, welcome_entities = render_custom_emoji_message(welcome)
 
     if media_file_id and media_type == "photo":
         if welcome_entities:
             await update.message.reply_photo(photo=media_file_id, caption=clean_welcome,
-                caption_entities=welcome_entities, reply_markup=kb)
+                caption_entities=welcome_entities, reply_markup=main_markup)
         else:
             await update.message.reply_photo(photo=media_file_id, caption=welcome,
-                parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+                parse_mode=ParseMode.MARKDOWN, reply_markup=main_markup)
         if kb:
             await update.message.reply_text("📋 القائمة:", reply_markup=kb)
 
     elif media_file_id and media_type == "sticker":
         await update.message.reply_sticker(sticker=media_file_id)
-        await send_with_custom_emoji(update.message, welcome, reply_markup=kb)
+        await send_with_custom_emoji(update.message, welcome, reply_markup=main_markup)
 
     else:
-        await send_with_custom_emoji(update.message, welcome, reply_markup=kb)
+        await send_with_custom_emoji(update.message, welcome, reply_markup=main_markup)
 
     # رسالة الغياب
     if data["status"]["is_away"]:
@@ -1864,7 +1875,6 @@ async def reaction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     if emoji_item.startswith("⭐[premium:") and emoji_item.endswith("]"):
                         custom_id = emoji_item[len("⭐[premium:"):-1]
-                        from telegram import ReactionTypeCustomEmoji
                         await context.bot.set_message_reaction(
                             chat_id=OWNER_ID,
                             message_id=owner_orig_msg_id,
@@ -1872,7 +1882,6 @@ async def reaction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             is_big=False
                         )
                     else:
-                        from telegram import ReactionTypeEmoji
                         await context.bot.set_message_reaction(
                             chat_id=OWNER_ID,
                             message_id=owner_orig_msg_id,
