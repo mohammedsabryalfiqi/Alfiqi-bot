@@ -415,15 +415,23 @@ print("✅ تم تحميل keyboards.py V5.0")
 
 
 # ═══════════════════════════════════════════════════════════════
-#    🟢 الأزرار الدائمة — ReplyKeyboard (الأزرار الخضراء الحقيقية)
+#    🟢 الأزرار الدائمة — ReplyKeyboard (الأزرار الرمادية الثابتة)
 # ═══════════════════════════════════════════════════════════════
+
+def _strip_emoji_tokens(label: str) -> str:
+    """
+    يحذف {ID} من label الزر لأن KeyboardButton لا يدعم custom emoji entities.
+    مثال: "مجموعة {5368324456789} خطوط" → "مجموعة خطوط"
+    الحل البديل: الأدمن يكتب الإيموجي مباشرة في الاسم (💎 مجموعة خطوط)
+    """
+    import re as _re
+    return _re.sub(r'\{\d{10,}\}', '', label).strip()
+
 
 def persistent_kb():
     """
-    ReplyKeyboard دائم يظهر بالستايل الأخضر تحت رسالة الترحيب.
-    - {EMOJI_ID} في label يُحوَّل إلى placeholder مرئي (تيليجرام يعرض الإيموجي المميز)
-    - أزرار URL تُعالَج كأزرار نص عادية (الرابط يُرسل عند الضغط كـ inline button)
-    - لا يُستخدم WebAppInfo لتفادي button_url_invalid
+    ReplyKeyboard ثابت يظهر أسفل الشاشة دائماً.
+    ملاحظة: KeyboardButton لا يدعم custom emoji — اكتب الإيموجي مباشرة في الاسم.
     يعيد None إذا لا توجد أزرار.
     """
     buttons = data.get("persistent_buttons", [])
@@ -432,9 +440,8 @@ def persistent_kb():
 
     rows, row = [], []
     for b in buttons:
-        raw_label = b.get("label", "زر")
-        clean_label, _ = resolve_button_label(raw_label)
-        row.append(KeyboardButton(clean_label))
+        label = _strip_emoji_tokens(b.get("label", "زر")) or b.get("label", "زر")
+        row.append(KeyboardButton(label))
         if len(row) == 2:
             rows.append(row); row = []
     if row:
@@ -447,36 +454,6 @@ def persistent_kb():
         one_time_keyboard=False,
         input_field_placeholder="اختر زراً أو اكتب رسالتك...",
     )
-
-
-def persistent_inline_kb():
-    """
-    InlineKeyboard للأزرار الدائمة — يُستخدم ملصقاً برسالة الترحيب
-    ليظهر الأزرار تحتها مباشرةً بالإضافة إلى ReplyKeyboard الأخضر.
-    يعيد None إذا لا توجد أزرار.
-    """
-    buttons = data.get("persistent_buttons", [])
-    if not buttons:
-        return None
-
-    rows, row = [], []
-    for i, b in enumerate(buttons):
-        raw_label = b.get("label", "زر")
-        clean_label, _ = resolve_button_label(raw_label)
-        if b.get("type") == "url":
-            val = b.get("value", "")
-            if val.startswith(("https://", "http://")):
-                row.append(InlineKeyboardButton(clean_label, url=val))
-            else:
-                row.append(InlineKeyboardButton(clean_label, callback_data=f"pbtn_text_{i}"))
-        else:
-            row.append(InlineKeyboardButton(clean_label, callback_data=f"pbtn_text_{i}"))
-        if len(row) == 2:
-            rows.append(row); row = []
-    if row:
-        rows.append(row)
-
-    return InlineKeyboardMarkup(rows)
 
 
 def pbuttons_menu():

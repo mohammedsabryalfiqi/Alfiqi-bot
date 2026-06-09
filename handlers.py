@@ -193,7 +193,7 @@ async def send_with_custom_emoji(bot_or_msg, text: str, chat_id=None, **kwargs):
 
 
 from keyboards import (
-    persistent_kb, persistent_inline_kb, pbuttons_menu, pbtn_view_menu,
+    persistent_kb, pbuttons_menu, pbtn_view_menu,
     back_btn, cancel_btn, main_menu,
     stats_menu, admins_menu, admin_perms_menu, select_user_menu,
     settings_menu, msg_settings_menu, away_menu,
@@ -320,15 +320,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).replace("{name}", user.first_name or "عزيزي")
         from telegram import InlineKeyboardMarkup, InlineKeyboardButton
         has_btns = bool(data.get("persistent_buttons"))
+        kb = persistent_kb() if has_btns else None
         fallback_btn = InlineKeyboardMarkup([[
             InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
         ]])
-        markup = None if has_btns else fallback_btn
-        await send_with_custom_emoji(update.message, welcome, reply_markup=markup)
-        if has_btns:
-            kb = persistent_kb()
-            if kb:
-                await update.message.reply_text("📋", reply_markup=kb)
+        await send_with_custom_emoji(update.message, welcome,
+            reply_markup=kb if kb else fallback_btn)
         if data["status"]["is_away"]:
             await asyncio.sleep(1)
             await send_with_custom_emoji(update.message, data["messages"]["away"])
@@ -346,7 +343,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     from telegram import InlineKeyboardMarkup, InlineKeyboardButton
     has_btns = bool(data.get("persistent_buttons"))
-    # رسالة الترحيب تحمل زر "أرسل رسالتك" فقط إذا لا توجد أزرار دائمة
+    kb = persistent_kb() if has_btns else None
+    # زر احتياطي لو ما في أزرار دائمة
     fallback_btn = InlineKeyboardMarkup([[
         InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
     ]])
@@ -354,26 +352,28 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_welcome, welcome_entities = render_custom_emoji_message(welcome)
 
     if media_file_id and media_type == "photo":
-        markup = None if has_btns else fallback_btn
+        # الصورة + inline btn (ReplyKeyboard لا يدعم مع الصور مباشرةً)
+        photo_markup = None if has_btns else fallback_btn
         if welcome_entities:
             await update.message.reply_photo(photo=media_file_id, caption=clean_welcome,
-                caption_entities=welcome_entities, reply_markup=markup)
+                caption_entities=welcome_entities, reply_markup=photo_markup)
         else:
             await update.message.reply_photo(photo=media_file_id, caption=welcome,
-                parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+                parse_mode=ParseMode.MARKDOWN, reply_markup=photo_markup)
+        # ReplyKeyboard في رسالة منفصلة بعد الصورة
+        if kb:
+            await update.message.reply_text("📋 القائمة:", reply_markup=kb)
+
     elif media_file_id and media_type == "sticker":
         await update.message.reply_sticker(sticker=media_file_id)
-        markup = None if has_btns else fallback_btn
-        await send_with_custom_emoji(update.message, welcome, reply_markup=markup)
-    else:
-        markup = None if has_btns else fallback_btn
-        await send_with_custom_emoji(update.message, welcome, reply_markup=markup)
+        # رسالة الترحيب + ReplyKeyboard مباشرة
+        await send_with_custom_emoji(update.message, welcome,
+            reply_markup=kb if kb else fallback_btn)
 
-    # 🟢 الأزرار الدائمة — ReplyKeyboard الأخضر في رسالة منفصلة
-    if has_btns:
-        kb = persistent_kb()
-        if kb:
-            await update.message.reply_text("📋", reply_markup=kb)
+    else:
+        # نص فقط — ReplyKeyboard مع رسالة الترحيب مباشرةً
+        await send_with_custom_emoji(update.message, welcome,
+            reply_markup=kb if kb else fallback_btn)
 
     # رسالة الغياب
     if data["status"]["is_away"]:
@@ -656,12 +656,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cb == "start_chat":
         await query.answer()
-        has_btns = bool(data.get("persistent_buttons"))
-        if has_btns:
-            kb = persistent_kb()
-            await query.message.reply_text("📋", reply_markup=kb)
-        else:
-            await query.message.reply_text("📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً")
+        kb = persistent_kb()
+        await query.message.reply_text(
+            "📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً",
+            reply_markup=kb if kb else None
+        )
         return
 
     # 🟢 ضغط زر نص دائم من قِبَل المستخدم
@@ -1212,7 +1211,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(
             f"✅ الاسم: **{msg.text.strip()[:50]}**\n\n"
             f"📝 الآن أرسل **النص** اللي هيرد على المستخدم:\n"
-            f"💡 يمكنك استخدام `{{EMOJI_ID}}` لإيموجي بريميوم",
+            f"💡 يمكنك استخدام `{{EMOJI_ID}}` في نص الرد\n"
+            f"⚠️ الإيموجي في **اسم الزر** اكتبه مباشرة: `💎 حساب المدير`",
             reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN,
         )
         return
