@@ -110,9 +110,6 @@ def main_menu():
         [
             btn("👥 مستخدمين البوت", "users_list", "primary"),
         ],
-        [
-            btn("🟢 الأزرار الدائمة", "pbuttons", "primary"),
-        ],
     ])
 
 # ═══════════════════════════════════════════════════════════════
@@ -447,50 +444,4 @@ def _strip_emoji_tokens(label: str) -> str:
     return _re.sub(r'\{\d{10,}\}', '', label).strip()
 
 
-def persistent_kb():
-    """
-    ReplyKeyboard ثابت يظهر أسفل الشاشة دائماً.
-    ملاحظة: KeyboardButton لا يدعم custom emoji — اكتب الإيموجي مباشرة في الاسم.
-    يعيد None إذا لا توجد أزرار.
-    """
-    buttons = data.get("persistent_buttons", [])
-    if not buttons:
-        return None
 
-    rows, row = [], []
-    for b in buttons:
-        label = _strip_emoji_tokens(b.get("label", "زر")) or b.get("label", "زر")
-        row.append(KeyboardButton(label))
-        if len(row) == 2:
-            rows.append(row); row = []
-    if row:
-        rows.append(row)
-
-    return ReplyKeyboardMarkup(
-        rows,
-        resize_keyboard=True,
-        is_persistent=True,
-        one_time_keyboard=False,
-        input_field_placeholder="اختر زراً أو اكتب رسالتك...",
-    )
-
-
-def pbuttons_menu():
-    btns = []
-    for i, b in enumerate(data.get("persistent_buttons", [])):
-        icon = "🔗" if b.get("type") == "url" else "💬"
-        btns.append([btn(f"{icon} {b.get('label','')[:25]}", f"pbtn_view_{i}", "primary")])
-    if not btns:
-        btns.append([btn("📭 لا توجد أزرار بعد", "none")])
-    btns.append([btn("➕ إضافة زر نص", "pbtn_add_text", "primary")])
-    btns.append([btn("🔗 إضافة زر رابط", "pbtn_add_url", "primary")])
-    if data.get("persistent_buttons"):
-        btns.append([btn("🗑️ حذف الكل", "pbtn_clear_all", "danger")])
-    btns.append([btn("🔙 رجوع", "main", "primary")])
-    return InlineKeyboardMarkup(btns)
-
-def pbtn_view_menu(idx):
-    return InlineKeyboardMarkup([
-        [btn("🗑️ حذف هذا الزر", f"pbtn_del_{idx}", "danger")],
-        [btn("🔙 رجوع", "pbuttons", "primary")],
-    ])

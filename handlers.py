@@ -193,7 +193,6 @@ async def send_with_custom_emoji(bot_or_msg, text: str, chat_id=None, **kwargs):
 
 
 from keyboards import (
-    persistent_kb, pbuttons_menu, pbtn_view_menu,
     back_btn, cancel_btn, main_menu,
     stats_menu, admins_menu, admin_perms_menu, select_user_menu,
     settings_menu, msg_settings_menu, away_menu,
@@ -340,14 +339,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media_type    = welcome_media.get("type")
 
     from telegram import InlineKeyboardMarkup
-    has_btns = bool(data.get("persistent_buttons"))
-    kb = persistent_kb() if has_btns else None
     _raw_prompt = data["messages"].get("send_prompt", "📩 أرسل رسالتك")
-    prompt_btn = InlineKeyboardMarkup([[
+    main_markup = InlineKeyboardMarkup([[
         btn(_raw_prompt, "start_chat", "primary")
     ]])
-    # الزر الرئيسي: الأزرار الدائمة إن وُجدت، وإلا زر "أرسل رسالتك"
-    main_markup = kb if has_btns else prompt_btn
 
     clean_welcome, welcome_entities = render_custom_emoji_message(welcome)
 
@@ -435,80 +430,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ══════════════════════════════════════════════════════════
     #              🟢 الأزرار الدائمة (Persistent)
     # ══════════════════════════════════════════════════════════
-    if cb == "pbuttons":
-        if not is_owner(user.id): return
-        count = len(data.get("persistent_buttons", []))
-        await query.edit_message_text(
-            f"🟢 **الأزرار الدائمة**\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 العدد الحالي: **{count}**\n\n"
-            f"الأزرار تظهر للمستخدم دائماً تحت حقل الكتابة.\n"
-            f"💡 زر نص: يرد على المستخدم بنص جاهز\n"
-            f"💡 زر رابط: يفتح صفحة ويب داخل تيليجرام",
-            reply_markup=pbuttons_menu(), parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    if cb == "pbtn_add_text":
-        if not is_owner(user.id): return
-        context.user_data["waiting"] = "pbtn_text_label"
-        await query.edit_message_text(
-            "📝 **إضافة زر نص**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "أرسل **اسم الزر** (اللي هيظهر للمستخدم):",
-            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    if cb == "pbtn_add_url":
-        if not is_owner(user.id): return
-        context.user_data["waiting"] = "pbtn_url_label"
-        await query.edit_message_text(
-            "🔗 **إضافة زر رابط**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "أرسل **اسم الزر**:",
-            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    if cb.startswith("pbtn_view_"):
-        if not is_owner(user.id): return
-        idx = int(cb.split("_")[-1])
-        pbtns = data.get("persistent_buttons", [])
-        if 0 <= idx < len(pbtns):
-            b = pbtns[idx]
-            kind = "🔗 رابط" if b.get("type") == "url" else "💬 نص"
-            await query.edit_message_text(
-                f"🟢 **زر دائم**\n━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📛 الاسم: **{b.get('label','')}**\n"
-                f"🏷️ النوع: {kind}\n"
-                f"📝 القيمة:\n`{b.get('value','')[:200]}`",
-                reply_markup=pbtn_view_menu(idx), parse_mode=ParseMode.MARKDOWN,
-            )
-        return
-
-    if cb.startswith("pbtn_del_"):
-        if not is_owner(user.id): return
-        idx = int(cb.split("_")[-1])
-        pbtns = data.get("persistent_buttons", [])
-        if 0 <= idx < len(pbtns):
-            pbtns.pop(idx)
-            save_data()
-            await query.answer("✅ تم الحذف", show_alert=True)
-        await query.edit_message_text(
-            f"🟢 **الأزرار الدائمة**\n📊 العدد: **{len(data.get('persistent_buttons', []))}**",
-            reply_markup=pbuttons_menu(), parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    if cb == "pbtn_clear_all":
-        if not is_owner(user.id): return
-        data["persistent_buttons"] = []
-        save_data()
-        await query.answer("✅ تم حذف الكل", show_alert=True)
-        await query.edit_message_text(
-            "🟢 **الأزرار الدائمة**\n📭 لا توجد أزرار",
-            reply_markup=pbuttons_menu(), parse_mode=ParseMode.MARKDOWN,
-        )
-        return
 
     if cb == "main":
         if not is_owner(user.id):
@@ -649,22 +570,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cb == "start_chat":
         await query.answer()
-        kb = persistent_kb()
-        prompt = data["messages"].get("send_prompt", "📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً")
-        await send_with_custom_emoji(query.message, prompt, reply_markup=kb if kb else None)
-        return
-
-    # 🟢 ضغط زر نص دائم من قِبَل المستخدم
-    if cb.startswith("pbtn_text_"):
-        await query.answer()
-        try:
-            idx = int(cb.split("_")[-1])
-            pb  = data.get("persistent_buttons", [])[idx]
-            val = pb.get("value", "")
-            if val:
-                await send_with_custom_emoji(query.message, val)
-        except (IndexError, ValueError):
-            await query.answer("⚠️ الزر لم يُعثر عليه", show_alert=True)
+        # الزر للإشارة فقط — لا يرسل رسالة
         return
 
     if cb == "users_list":
@@ -1203,57 +1109,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("⚠️ أرسل صورة أو ملصق فقط")
         return
 
-
-    if waiting == "pbtn_text_label" and msg.text:
-        context.user_data["pbtn_label"] = msg.text.strip()[:50]
-        context.user_data["waiting"] = "pbtn_text_value"
-        await msg.reply_text(
-            f"✅ الاسم: **{msg.text.strip()[:50]}**\n\n"
-            f"📝 الآن أرسل **النص** اللي هيرد على المستخدم:\n"
-            f"💡 يمكنك استخدام `{{EMOJI_ID}}` في نص الرد\n"
-            f"⚠️ الإيموجي في **اسم الزر** اكتبه مباشرة: `💎 حساب المدير`",
-            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    if waiting == "pbtn_text_value" and msg.text:
-        label = context.user_data.get("pbtn_label", "زر")
-        data.setdefault("persistent_buttons", []).append({
-            "label": label, "type": "text", "value": msg.text,
-        })
-        save_data(); context.user_data.clear()
-        await msg.reply_text(
-            f"✅ تم إضافة الزر **{label}**",
-            reply_markup=back_btn("pbuttons"), parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    if waiting == "pbtn_url_label" and msg.text:
-        context.user_data["pbtn_label"] = msg.text.strip()[:50]
-        context.user_data["waiting"] = "pbtn_url_value"
-        await msg.reply_text(
-            f"✅ الاسم: **{msg.text.strip()[:50]}**\n\n"
-            f"🔗 الآن أرسل **الرابط** (لازم يبدأ بـ https://):\n"
-            f"💡 يمكنك استخدام `{{EMOJI_ID}}` في الاسم",
-            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    if waiting == "pbtn_url_value" and msg.text:
-        url = msg.text.strip()
-        if not url.startswith("https://"):
-            await msg.reply_text("❌ الرابط لازم يبدأ بـ https://", reply_markup=cancel_btn())
-            return
-        label = context.user_data.get("pbtn_label", "زر")
-        data.setdefault("persistent_buttons", []).append({
-            "label": label, "type": "url", "value": url,
-        })
-        save_data(); context.user_data.clear()
-        await msg.reply_text(
-            f"✅ تم إضافة زر الرابط **{label}**",
-            reply_markup=back_btn("pbuttons"), parse_mode=ParseMode.MARKDOWN,
-        )
-        return
 
     if waiting == "edit_away" and msg.text:
         data["messages"]["away"] = msg.text
