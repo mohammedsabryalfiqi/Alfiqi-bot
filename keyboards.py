@@ -173,6 +173,7 @@ def msg_settings_menu():
         [btn("⏰ رسالة الغياب",      "edit_away",           "primary")],
         [btn("✅ رسالة الاستلام",    "edit_received",       "primary")],
         [btn("🔓 رسالة العودة بعد الحظر", "edit_returned_block", "primary")],
+        [btn("💬 نص ما بعد الترحيب", "edit_send_prompt",   "primary")],
         [btn("🔙 رجوع",              "settings",            "primary")],
     ])
 

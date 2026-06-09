@@ -318,14 +318,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "returned_after_block",
             "عوداً حميداً 😊\n\nسعيدون بعودتك! أرسل رسالتك وسيتم الرد عليك ❤️"
         ).replace("{name}", user.first_name or "عزيزي")
-        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-        has_btns = bool(data.get("persistent_buttons"))
-        kb = persistent_kb() if has_btns else None
-        fallback_btn = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
-        ]])
-        await send_with_custom_emoji(update.message, welcome,
-            reply_markup=kb if kb else fallback_btn)
+        await send_with_custom_emoji(update.message, welcome, reply_markup=None)
         if data["status"]["is_away"]:
             await asyncio.sleep(1)
             await send_with_custom_emoji(update.message, data["messages"]["away"])
@@ -344,36 +337,25 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from telegram import InlineKeyboardMarkup, InlineKeyboardButton
     has_btns = bool(data.get("persistent_buttons"))
     kb = persistent_kb() if has_btns else None
-    # زر احتياطي لو ما في أزرار دائمة
-    fallback_btn = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📩 أرسل رسالتك", callback_data="start_chat")
-    ]])
 
     clean_welcome, welcome_entities = render_custom_emoji_message(welcome)
 
     if media_file_id and media_type == "photo":
-        # الصورة + inline btn (ReplyKeyboard لا يدعم مع الصور مباشرةً)
-        photo_markup = None if has_btns else fallback_btn
         if welcome_entities:
             await update.message.reply_photo(photo=media_file_id, caption=clean_welcome,
-                caption_entities=welcome_entities, reply_markup=photo_markup)
+                caption_entities=welcome_entities, reply_markup=kb)
         else:
             await update.message.reply_photo(photo=media_file_id, caption=welcome,
-                parse_mode=ParseMode.MARKDOWN, reply_markup=photo_markup)
-        # ReplyKeyboard في رسالة منفصلة بعد الصورة
+                parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
         if kb:
             await update.message.reply_text("📋 القائمة:", reply_markup=kb)
 
     elif media_file_id and media_type == "sticker":
         await update.message.reply_sticker(sticker=media_file_id)
-        # رسالة الترحيب + ReplyKeyboard مباشرة
-        await send_with_custom_emoji(update.message, welcome,
-            reply_markup=kb if kb else fallback_btn)
+        await send_with_custom_emoji(update.message, welcome, reply_markup=kb)
 
     else:
-        # نص فقط — ReplyKeyboard مع رسالة الترحيب مباشرةً
-        await send_with_custom_emoji(update.message, welcome,
-            reply_markup=kb if kb else fallback_btn)
+        await send_with_custom_emoji(update.message, welcome, reply_markup=kb)
 
     # رسالة الغياب
     if data["status"]["is_away"]:
@@ -657,10 +639,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cb == "start_chat":
         await query.answer()
         kb = persistent_kb()
-        await query.message.reply_text(
-            "📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً",
-            reply_markup=kb if kb else None
-        )
+        prompt = data["messages"].get("send_prompt", "📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً")
+        await send_with_custom_emoji(query.message, prompt, reply_markup=kb if kb else None)
         return
 
     # 🟢 ضغط زر نص دائم من قِبَل المستخدم
@@ -757,6 +737,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = data["messages"].get("returned_after_block", "عوداً حميداً {name} 😊")
         await query.edit_message_text(
             f"✏️ **رسالة العودة بعد الحظر الحالية:**\n\n{current}\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n📝 أرسل الرسالة الجديدة\n💡 استخدم {{name}} لاسم المستخدم",
+            reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
+
+    if cb == "edit_send_prompt":
+        if not is_owner(user.id): return
+        context.user_data["waiting"] = "edit_send_prompt"
+        current = data["messages"].get("send_prompt", "📩 أرسل رسالتك الآن وسيتم الرد عليك قريباً")
+        await query.edit_message_text(
+            f"✏️ **نص ما بعد الترحيب الحالي:**\n\n{current}\n\n━━━━━━━━━━━━━━━━━━━━━━━━\n📝 أرسل النص الجديد:",
             reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
         return
 
@@ -1272,6 +1260,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["messages"]["returned_after_block"] = msg.text
         save_data(); context.user_data.clear()
         await msg.reply_text("✅ تم حفظ رسالة العودة بعد الحظر!", reply_markup=back_btn("msg_settings"))
+
+    if waiting == "edit_send_prompt":
+        data["messages"]["send_prompt"] = msg.text
+        save_data()
+        await msg.reply_text("✅ تم حفظ نص ما بعد الترحيب!", reply_markup=back_btn("msg_settings"))
         return
 
     if waiting == "sr_trigger" and msg.text:
@@ -1864,22 +1857,41 @@ async def reaction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         return
 
-    text = (
-        f"{action} **{user_name}**  ↩️\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 `{uid}`\n"
-        f"💬 الرسالة في محادثته: `{reacted_msg_id}`\n"
-        f"🎭 التفاعل: {emojis_txt}"
-    )
-
     try:
-        if owner_orig_msg_id:
-            await context.bot.send_message(
-                OWNER_ID, text,
-                reply_to_message_id=owner_orig_msg_id,
-                parse_mode=ParseMode.MARKDOWN,
-            )
-        else:
-            await context.bot.send_message(OWNER_ID, text, parse_mode=ParseMode.MARKDOWN)
+        if owner_orig_msg_id and new_list:
+            # ضع التفاعل مباشرة على رسالة المالك بدون رسالة إشعار
+            for emoji_item in new_list:
+                try:
+                    if emoji_item.startswith("⭐[premium:") and emoji_item.endswith("]"):
+                        custom_id = emoji_item[len("⭐[premium:"):-1]
+                        from telegram import ReactionTypeCustomEmoji
+                        await context.bot.set_message_reaction(
+                            chat_id=OWNER_ID,
+                            message_id=owner_orig_msg_id,
+                            reaction=[ReactionTypeCustomEmoji(custom_emoji_id=custom_id)],
+                            is_big=False
+                        )
+                    else:
+                        from telegram import ReactionTypeEmoji
+                        await context.bot.set_message_reaction(
+                            chat_id=OWNER_ID,
+                            message_id=owner_orig_msg_id,
+                            reaction=[ReactionTypeEmoji(emoji=emoji_item)],
+                            is_big=False
+                        )
+                    break  # تلغرام يقبل تفاعل واحد
+                except Exception:
+                    pass  # بريميوم غير مدعوم أو خطأ آخر — تجاهل بصمت
+        elif owner_orig_msg_id and old_list:
+            # إلغاء تفاعل — امسح من رسالة المالك
+            try:
+                await context.bot.set_message_reaction(
+                    chat_id=OWNER_ID,
+                    message_id=owner_orig_msg_id,
+                    reaction=[],
+                    is_big=False
+                )
+            except Exception:
+                pass
     except Exception as e:
         print(f"reaction_handler error: {e}")
