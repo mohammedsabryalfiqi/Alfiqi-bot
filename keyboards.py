@@ -422,6 +422,10 @@ def persistent_kb():
     """
     Reply keyboard دائم يظهر للمستخدم — يتم تكوينه من لوحة الأدمن.
     يدعم {EMOJI_ID} في label الزر لعرض الإيموجيات المميزة البريميوم.
+    
+    ملاحظة: جميع الأزرار نصية بغض النظر عن نوعها (text/url) —
+    لأن ReplyKeyboard لا يدعم روابط مباشرة. أزرار URL تُرسل كـ
+    InlineKeyboard عند الضغط عليها.
     """
     buttons = data.get("persistent_buttons", [])
     if not buttons:
@@ -429,13 +433,8 @@ def persistent_kb():
     rows, row = [], []
     for b in buttons:
         raw_label = b.get("label", "زر")
-        # حوّل {EMOJI_ID} → placeholder مرئي (الـ entities لا تُدعم في KeyboardButton مباشرةً)
         clean_label, _ = resolve_button_label(raw_label)
-        # روابط URL → web_app يفتح داخل تيليجرام
-        if b.get("type") == "url" and b.get("value", "").startswith("https://"):
-            row.append(KeyboardButton(clean_label, web_app=WebAppInfo(url=b["value"])))
-        else:
-            row.append(KeyboardButton(clean_label))
+        row.append(KeyboardButton(clean_label))   # دائماً نصي — URL تُعالَج عند الضغط
         if len(row) == 2:
             rows.append(row); row = []
     if row:

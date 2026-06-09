@@ -52,6 +52,13 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    err = str(context.error).lower()
+    # أخطاء تشغيلية بسيطة — نسجّلها فقط بدون إزعاج الأدمن
+    ignored = ("flood", "timed out", "network", "connection", "button_url_invalid",
+               "message is not modified", "query is too old", "message to delete not found")
+    if any(e in err for e in ignored):
+        logger.warning(f"Ignored error: {context.error}")
+        return
     logger.exception("خطأ غير متوقع", exc_info=context.error)
     try:
         await context.bot.send_message(
