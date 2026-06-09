@@ -200,7 +200,7 @@ from keyboards import (
     quick_replies_menu, view_qr_menu,
     banned_menu, vip_menu, broadcast_menu,
     search_menu, search_results_menu, guide_menu,
-    incoming_msg_btns, user_info_menu, confirm_menu,
+    incoming_msg_btns, reaction_picker_menu, user_info_menu, confirm_menu,
     users_list_menu, btn
 )
 
@@ -986,6 +986,58 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=cancel_btn(), parse_mode=ParseMode.MARKDOWN)
         return
 
+    if cb.startswith("react_menu_"):
+        uid = cb[len("react_menu_"):]
+        # ابحث عن user_msg_id المرتبط بهذه الرسالة
+        owner_msg_id = str(query.message.message_id)
+        info = data.get("msg_map", {}).get(owner_msg_id, {})
+        user_msg_id = info.get("user_msg_id") or info.get("sent_id")
+        if not user_msg_id:
+            await query.answer("⚠️ لم يُعثر على رسالة المستخدم", show_alert=True)
+            return
+        await query.answer()
+        await query.message.reply_text(
+            "😊 اختر تفاعلاً:",
+            reply_markup=reaction_picker_menu(uid, user_msg_id)
+        )
+        return
+
+    if cb.startswith("doreact_"):
+        parts = cb.split("_", 3)
+        # doreact_{uid}_{msg_id}_{emoji}
+        if len(parts) < 4:
+            await query.answer("❌ خطأ", show_alert=True)
+            return
+        r_uid, r_msg_id, r_emoji = parts[1], parts[2], parts[3]
+        try:
+            await context.bot.set_message_reaction(
+                chat_id=int(r_uid),
+                message_id=int(r_msg_id),
+                reaction=[ReactionTypeEmoji(emoji=r_emoji)],
+                is_big=False
+            )
+            await query.answer("✅ تم التفاعل")
+            await query.message.delete()
+        except Exception as ex:
+            # fallback ❤
+            try:
+                await context.bot.set_message_reaction(
+                    chat_id=int(r_uid),
+                    message_id=int(r_msg_id),
+                    reaction=[ReactionTypeEmoji(emoji="❤")],
+                    is_big=False
+                )
+                await query.answer("✅ تم التفاعل (fallback ❤)")
+                await query.message.delete()
+            except Exception:
+                await query.answer(f"❌ فشل: {ex}", show_alert=True)
+        return
+
+    if cb.startswith("cancelreact_"):
+        await query.answer()
+        await query.message.delete()
+        return
+
     if cb.startswith("sendqr_"):
         parts   = cb.split("_", 2)
         uid     = parts[1]
@@ -1345,6 +1397,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             smart = get_smart_reply(msg.text)
             if smart:
                 await send_with_custom_emoji(msg, smart)
+                return  # رد ذكي → لا نعيد للمالك
 
         try:
             user_name  = data["users"].get(uid, {}).get("name", "مجهول")
@@ -1561,13 +1614,23 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if emoji_raw.startswith("{") and emoji_raw.endswith("}"):
                             custom_id = emoji_raw[1:-1].strip()
                             if custom_id.isdigit():
-                                reaction = [ReactionTypeCustomEmoji(custom_id)]
-                                await context.bot.set_message_reaction(
-                                    chat_id=int(target_id),
-                                    message_id=int(target_msg_id),
-                                    reaction=reaction,
-                                    is_big=False
-                                )
+                                try:
+                                    reaction = [ReactionTypeCustomEmoji(custom_id)]
+                                    await context.bot.set_message_reaction(
+                                        chat_id=int(target_id),
+                                        message_id=int(target_msg_id),
+                                        reaction=reaction,
+                                        is_big=False
+                                    )
+                                except Exception:
+                                    # fallback: إيموجي عادي لو البريميوم غير متاح
+                                    reaction = [ReactionTypeEmoji("❤")]
+                                    await context.bot.set_message_reaction(
+                                        chat_id=int(target_id),
+                                        message_id=int(target_msg_id),
+                                        reaction=reaction,
+                                        is_big=False
+                                    )
                                 await msg.delete()
                             else:
                                 await msg.reply_text(
@@ -1578,12 +1641,23 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 )
                         else:
                             # ── إيموجي عادي ──
-                            reaction = [ReactionTypeEmoji(emoji_raw)]
-                            await context.bot.set_message_reaction(
-                                chat_id=int(target_id),
-                                message_id=int(target_msg_id),
-                                reaction=reaction
-                            )
+                            try:
+                                reaction = [ReactionTypeEmoji(emoji_raw)]
+                                await context.bot.set_message_reaction(
+                                    chat_id=int(target_id),
+                                    message_id=int(target_msg_id),
+                                    reaction=reaction,
+                                    is_big=False
+                                )
+                            except Exception:
+                                # fallback: ❤ لو الإيموجي مش في القائمة المتاحة
+                                reaction = [ReactionTypeEmoji("❤")]
+                                await context.bot.set_message_reaction(
+                                    chat_id=int(target_id),
+                                    message_id=int(target_msg_id),
+                                    reaction=reaction,
+                                    is_big=False
+                                )
                             await msg.delete()
                     except Exception as ex:
                         await msg.reply_text(f"❌ فشل: {ex}")
@@ -1730,22 +1804,38 @@ async def reaction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     if emoji_item.startswith("⭐[premium:") and emoji_item.endswith("]"):
                         custom_id = emoji_item[len("⭐[premium:"):-1]
-                        await context.bot.set_message_reaction(
-                            chat_id=OWNER_ID,
-                            message_id=owner_orig_msg_id,
-                            reaction=[ReactionTypeCustomEmoji(custom_emoji_id=custom_id)],
-                            is_big=False
-                        )
+                        try:
+                            await context.bot.set_message_reaction(
+                                chat_id=OWNER_ID,
+                                message_id=owner_orig_msg_id,
+                                reaction=[ReactionTypeCustomEmoji(custom_emoji_id=custom_id)],
+                                is_big=False
+                            )
+                        except Exception:
+                            await context.bot.set_message_reaction(
+                                chat_id=OWNER_ID,
+                                message_id=owner_orig_msg_id,
+                                reaction=[ReactionTypeEmoji(emoji="❤")],
+                                is_big=False
+                            )
                     else:
-                        await context.bot.set_message_reaction(
-                            chat_id=OWNER_ID,
-                            message_id=owner_orig_msg_id,
-                            reaction=[ReactionTypeEmoji(emoji=emoji_item)],
-                            is_big=False
-                        )
+                        try:
+                            await context.bot.set_message_reaction(
+                                chat_id=OWNER_ID,
+                                message_id=owner_orig_msg_id,
+                                reaction=[ReactionTypeEmoji(emoji=emoji_item)],
+                                is_big=False
+                            )
+                        except Exception:
+                            await context.bot.set_message_reaction(
+                                chat_id=OWNER_ID,
+                                message_id=owner_orig_msg_id,
+                                reaction=[ReactionTypeEmoji(emoji="❤")],
+                                is_big=False
+                            )
                     break  # تلغرام يقبل تفاعل واحد
                 except Exception:
-                    pass  # بريميوم غير مدعوم أو خطأ آخر — تجاهل بصمت
+                    pass  # فشل كامل — تجاهل بصمت
         elif owner_orig_msg_id and old_list:
             # إلغاء تفاعل — امسح من رسالة المالك
             try:

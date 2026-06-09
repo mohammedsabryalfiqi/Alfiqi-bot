@@ -370,6 +370,7 @@ def incoming_msg_btns(user_id):
 
     row1 = [
         btn("↩️ رد", f"reply_{user_id}", "primary"),
+        btn("😊 تفاعل", f"react_menu_{user_id}", "primary"),
         btn(
             "✅ فك حظر" if is_user_banned else "🚫 حظر",
             f"unban_{user_id}" if is_user_banned else f"ban_{user_id}",
@@ -384,6 +385,21 @@ def incoming_msg_btns(user_id):
     if quick_btns:
         rows.append(quick_btns)
 
+    return InlineKeyboardMarkup(rows)
+
+
+def reaction_picker_menu(user_id, msg_id):
+    """قائمة إيموجيات شائعة للتفاعل السريع."""
+    emojis = ["❤", "👍", "🔥", "🥰", "👏", "😁", "🎉", "🤩", "😢", "💯"]
+    rows = []
+    row = []
+    for e in emojis:
+        row.append(btn(e, f"doreact_{user_id}_{msg_id}_{e}", "primary"))
+        if len(row) == 5:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([btn("❌ إلغاء", f"cancelreact_{user_id}", "danger")])
     return InlineKeyboardMarkup(rows)
 
 # ═══════════════════════════════════════════════════════════════
