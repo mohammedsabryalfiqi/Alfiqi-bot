@@ -1,8 +1,0 @@
-__pycache__/
-*.pyc
-*.pyo
-.venv/
-hostbot/data/
-*.log
-.env
-.DS_Store
