@@ -7,6 +7,7 @@ import json
 import html
 import logging
 import os
+import random
 import re
 import shutil
 import time
@@ -17,7 +18,8 @@ from pathlib import Path
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    LinkPreviewOptions, ReactionTypeEmoji, ReplyParameters, MessageEntity,
+    LinkPreviewOptions, ReactionTypeEmoji, ReactionTypeCustomEmoji,
+    ReplyParameters, MessageEntity,
 )
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
@@ -66,7 +68,7 @@ if _VOLUME_MOUNT_PATH:
 _DATA_FILENAMES = (
     "settings.json", "banned.json", "users.json", "msg_map.json",
     "old_stats.json", "user_state.json", "user_stats.json",
-    "message_records.json", "audit_log.json",
+    "message_records.json", "audit_log.json", "reply_map.json",
 )
 
 
@@ -101,6 +103,7 @@ USER_STATE_FILE = DATA_DIR / "user_state.json"
 USER_STATS_FILE = DATA_DIR / "user_stats.json"
 MESSAGE_RECORDS_FILE = DATA_DIR / "message_records.json"
 AUDIT_LOG_FILE = DATA_DIR / "audit_log.json"
+REPLY_MAP_FILE = DATA_DIR / "reply_map.json"   # روابط ردود المالك ↔ رسائل الأعضاء (لعكس التفاعلات)
 
 DEFAULT_WELCOME = (
     "مرحبًا بك في بوت التواصل. 👋\n\n"
@@ -126,6 +129,50 @@ DEFAULT_AI_INSTRUCTIONS = (
 )
 DEFAULT_AI_MODEL = "gpt-4o-mini"
 DEFAULT_AI_BASE_URL = "https://api.openai.com/v1"
+
+# ── 🎯 إيموجي الاستلام التلقائي ───────────────────────────────────
+# قائمة تيليجرام الرسمية للتفاعلات (67 إيموجي) — أي إيموجي خارجها يرفضه
+# الـ API بخطأ REACTION_INVALID، فالاعتماد عليها يضمن نجاح التفاعل دائماً.
+RECEIPT_EMOJIS = [
+    "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
+    "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡",
+    "🥱", "🥴", "😍", "🐳", "❤️‍🔥", "🌚", "🌭", "💯", "🤣", "⚡",
+    "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈",
+    "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨",
+    "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿",
+    "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊",
+]
+# مجموعة إيجابية/محايدة فقط (بدون المسيء أو السلبي زي 🖕 💩 🤬 🤡 😭)
+# تُستخدم في الوضع العشوائي حتى لا يصل العضو إيموجي غير لائق من البوت.
+RECEIPT_EMOJIS_FRIENDLY = [
+    "👍", "❤", "🔥", "🥰", "👏", "😁", "🎉", "🤩", "🙏", "👌",
+    "😍", "🐳", "🌚", "🌭", "💯", "🤣", "⚡", "🍌", "🏆", "🍓",
+    "🍾", "😇", "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅",
+    "🆒", "💘", "🦄", "😘", "💊", "🙊", "👀", "🤓",
+]
+RECEIPT_EMOJI_RANDOM = "random"       # قيمة خاصة في الإعداد = "عشوائي من القائمة"
+DEFAULT_RECEIPT_EMOJI = "👍"          # الإيموجي الثابت الافتراضي للاستلام
+FALLBACK_RECEIPT_EMOJI = "👍"         # يُستخدم لو اختار المالك إيموجي مش مدعوم كتفاعل
+
+# ── ⚠️ نظام الإنذارات ─────────────────────────────────────────────
+DEFAULT_WARN_MAX = 2                  # عدد الإنذارات الكلي قبل الحظر التلقائي
+DEFAULT_WARN_REASON = "مخالفة تعليمات وقواعد التواصل في البوت"
+DEFAULT_WARN_MESSAGE = (
+    "⚠️ <b>إنذار رسمي</b>\n\n"
+    "{user_link}\n"
+    "<b>السبب:</b> {reason}\n"
+    "<b>عدد الإنذارات:</b> {count} من {max}\n"
+    "{progress}\n\n"
+    "{footer}"
+)
+DEFAULT_WARN_FOOTER = (
+    "⛔ عند استيفاء عدد الإنذارات سيتم حظرك من استخدام البوت حظراً دائماً.\n"
+    "يرجى الالتزام حتى لا تفقد إمكانية التواصل."
+)
+DEFAULT_WARN_FINAL_FOOTER = (
+    "⛔ <b>تم استيفاء عدد الإنذارات — تم حظرك من البوت حظراً دائماً.</b>\n"
+    "للاعتراض أو طلب رفع الحظر تواصل مع إدارة القناة."
+)
 
 def _load(path, default):
     if path.exists():
@@ -154,6 +201,17 @@ def load_settings():
     d.setdefault("ai_model", DEFAULT_AI_MODEL)
     d.setdefault("ai_base_url", DEFAULT_AI_BASE_URL)
     d.setdefault("protect_content_enabled", False)
+    # ── الإضافات الجديدة: عكس التفاعلات / إيموجي الاستلام / الأوامر العربية / الإنذارات ──
+    d.setdefault("reactions_mirror_enabled", True)      # 🪞 عكس التفاعلات بين المالك والعضو
+    d.setdefault("receipt_emoji_enabled", True)         # 🎯 إيموجي استلام تلقائي على رسالة العضو
+    d.setdefault("receipt_emoji", DEFAULT_RECEIPT_EMOJI)  # إيموجي ثابت أو كلمة "random"
+    d.setdefault("receipt_emoji_pool", "friendly")      # friendly | all (لوضع العشوائي)
+    d.setdefault("receipt_emoji_big", False)            # حركة التفاعل الكبيرة
+    d.setdefault("arabic_commands_enabled", True)       # 🇸🇦 أسماء عربية للأوامر
+    d.setdefault("warn_enabled", True)                  # ⚠️ نظام الإنذارات
+    d.setdefault("warn_max", DEFAULT_WARN_MAX)          # عدد الإنذارات الكلي
+    d.setdefault("warn_message", DEFAULT_WARN_MESSAGE)  # قالب رسالة الإنذار للعضو
+    d.setdefault("warn_auto_ban", True)                 # حظر دائم تلقائي عند استيفاء العدد
     d.setdefault("global_pin", {
         "source_message_id": None,
         "targets": {},
@@ -287,6 +345,41 @@ def save_msg_map(m):
     _save(MSG_MAP_FILE, {str(k): list(v) for k, v in m.items()})
 
 
+def load_reply_map():
+    """
+    يحمّل روابط ردود المالك من القرص: sent_id_at_user → (owner_msg_id, user_id).
+    بدون الحفظ ده كان عكس التفاعلات (عضو → مالك) بيتعطل بعد أي إعادة تشغيل
+    لأن الخريطة كانت في الذاكرة فقط.
+    """
+    raw = _load(REPLY_MAP_FILE, {})
+    result = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            try:
+                if isinstance(value, (list, tuple)) and len(value) >= 2:
+                    result[int(key)] = (int(value[0]), int(value[1]))
+            except (TypeError, ValueError):
+                continue
+    return result
+
+
+def save_reply_map(m):
+    # الاحتفاظ بآخر 3000 رابط فقط حتى لا يكبر الملف بلا حدود.
+    items = list(m.items())[-3000:]
+    try:
+        _save(REPLY_MAP_FILE, {str(k): [int(v[0]), int(v[1])] for k, v in items})
+    except (TypeError, ValueError, OSError) as e:
+        logger.error(f"تعذر حفظ reply_map: {e}")
+
+
+def remember_reply(sent_id: int, owner_msg_id: int, user_id: int):
+    """يسجّل رابط رد المالك عند العضو ويحفظه على القرص فوراً."""
+    if not sent_id:
+        return
+    reply_map[int(sent_id)] = (int(owner_msg_id), int(user_id))
+    save_reply_map(reply_map)
+
+
 # ═══════════════════════════════════════════════════════════════
 #  الحالة والإحصائيات والسجل — ميزات إدارة المستخدمين
 # ═══════════════════════════════════════════════════════════════
@@ -365,6 +458,10 @@ def _default_user_state():
         "snoozed_until": 0,
         "pinned": False,
         "pinned_message_id": None,
+        "warn_count": 0,          # ⚠️ عدد الإنذارات الحالية
+        "last_warn_at": 0,
+        "last_warn_reason": "",
+        "warn_ack_at": 0,         # وقت ضغط العضو على "تم الاستلام"
         "updated_at": time.time(),
     }
 
@@ -510,6 +607,7 @@ def clear_message_records(uid: int):
     for sent_id, (_, mapped_uid) in list(globals().get("reply_map", {}).items()):
         if int(mapped_uid) == int(uid):
             reply_map.pop(sent_id, None)
+    save_reply_map(reply_map)
     for owner_id, info in list(globals().get("owner_sent_map", {}).items()):
         if int(info.get("user_id", 0)) == int(uid):
             owner_sent_map.pop(owner_id, None)
@@ -573,6 +671,10 @@ AWAIT_AI_INSTRUCTIONS  = 7
 AWAIT_AI_KEY           = 8
 AWAIT_AI_MODEL         = 9
 AWAIT_BAN_REASON       = 10
+AWAIT_RECEIPT_EMOJI    = 11
+AWAIT_WARN_REASON      = 12
+AWAIT_WARN_MAX         = 13
+AWAIT_WARN_TEXT        = 14
 # ═══════════════════════════════════════════════════════════════
 #  خرائط الرسائل (ذاكرة)
 #  msg_map        : owner_fwd_id → (user_id, user_msg_id | None)
@@ -582,7 +684,7 @@ AWAIT_BAN_REASON       = 10
 # ═══════════════════════════════════════════════════════════════
 
 msg_map   = load_msg_map()
-reply_map = {}
+reply_map = load_reply_map()
 owner_sent_map = {}
 
 # وضع الإرسال الصامت: owner_id → user_id بانتظار الرسالة التالية لترسل بدون "رد"
@@ -593,6 +695,84 @@ pending_silent = {}
 # البرق يُضاف فقط عند أول رسالة أو بعد انقطاع ساعة
 user_last_msg_time = {}
 REACTION_COOLDOWN = 3600  # ثانية = ساعة واحدة
+
+# ═══════════════════════════════════════════════════════════════
+#  🎯 إيموجي الاستلام التلقائي
+# ═══════════════════════════════════════════════════════════════
+
+def receipt_emoji_pool() -> list[str]:
+    """القائمة المستخدمة في الوضع العشوائي حسب إعداد المالك."""
+    pool = load_settings().get("receipt_emoji_pool", "friendly")
+    return RECEIPT_EMOJIS if pool == "all" else RECEIPT_EMOJIS_FRIENDLY
+
+
+def normalize_receipt_emoji(value: str) -> str:
+    """
+    يتحقق أن الإيموجي المختار صالح كتفاعل في تيليجرام (من قائمة الـ67 الرسمية).
+    يُرجع ("random" | إيموجي صالح | None) — None يعني غير مدعوم.
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    if text.lower() in (RECEIPT_EMOJI_RANDOM, "عشوائي", "random"):
+        return RECEIPT_EMOJI_RANDOM
+    # بعض الإيموجي بتتكتب بأكثر من codepoint (❤ vs ❤️) — نقارن بشكل متسامح.
+    stripped = text.replace("\ufe0f", "")
+    for emoji in RECEIPT_EMOJIS:
+        if emoji == text or emoji.replace("\ufe0f", "") == stripped:
+            return emoji
+    return None
+
+
+def resolve_receipt_emoji(settings: dict | None = None) -> str:
+    """يرجع الإيموجي الفعلي اللي هيتحط على رسالة العضو (ثابت أو عشوائي)."""
+    s = settings if settings is not None else load_settings()
+    value = str(s.get("receipt_emoji", DEFAULT_RECEIPT_EMOJI) or "").strip()
+    if value.lower() == RECEIPT_EMOJI_RANDOM:
+        pool = RECEIPT_EMOJIS if s.get("receipt_emoji_pool") == "all" else RECEIPT_EMOJIS_FRIENDLY
+        return random.choice(pool or RECEIPT_EMOJIS)
+    return normalize_receipt_emoji(value) or FALLBACK_RECEIPT_EMOJI
+
+
+_receipt_reaction_error_notified = False
+
+
+async def apply_receipt_emoji(ctx, chat_id: int, message_id: int) -> str | None:
+    """
+    يضع إيموجي الاستلام على رسالة العضو كإشعار صامت أنه تم استلام الرسالة.
+    يفشل بصمت (بدون إزعاج العضو) لو تيليجرام رفض التفاعل، ويبلغ المالك مرة واحدة فقط.
+    """
+    global _receipt_reaction_error_notified
+    s = load_settings()
+    if not s.get("receipt_emoji_enabled", True):
+        return None
+    if not message_id:
+        return None
+    emoji = resolve_receipt_emoji(s)
+    try:
+        await ctx.bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=int(message_id),
+            reaction=[ReactionTypeEmoji(emoji)],
+            is_big=bool(s.get("receipt_emoji_big", False)),
+        )
+        return emoji
+    except TelegramError as e:
+        logger.warning(f"تعذر وضع إيموجي الاستلام على {chat_id}/{message_id}: {e}")
+        if not _receipt_reaction_error_notified:
+            _receipt_reaction_error_notified = True
+            try:
+                await ctx.bot.send_message(
+                    OWNER_ID,
+                    "⚠️ <b>إيموجي الاستلام التلقائي</b>\n\n"
+                    f"تيليجرام رفض وضع التفاعل على رسالة العضو:\n<code>{html.escape(str(e))}</code>\n\n"
+                    "الميزة تفضل مفعّلة وهتشتغل على باقي الرسائل. لو الخطأ مستمر "
+                    "يمكنك تعطيلها من لوحة التحكم ← 🎯 إيموجي الاستلام.",
+                    parse_mode=ParseMode.HTML,
+                )
+            except TelegramError:
+                pass
+        return None
 
 # ═══════════════════════════════════════════════════════════════
 #  مساعدات عامة
@@ -686,6 +866,21 @@ def owner_panel_keyboard():
     protect_label = "🟢 حماية المحتوى: مفعّلة" if s.get("protect_content_enabled") else "🔴 حماية المحتوى: معطّلة"
     ai_style = "success" if s.get("ai_enabled") else "danger"
     ai_label = "🟢 الرد بالذكاء الاصطناعي: مفعّل" if s.get("ai_enabled") else "🔴 الرد بالذكاء الاصطناعي: معطّل"
+    # ── الإضافات الجديدة ──────────────────────────────────────────
+    mirror_on = bool(s.get("reactions_mirror_enabled", True))
+    mirror_style = "success" if mirror_on else "danger"
+    mirror_label = "مفعّل" if mirror_on else "معطّل"
+    receipt_on = bool(s.get("receipt_emoji_enabled", True))
+    receipt_style = "success" if receipt_on else "danger"
+    receipt_value = str(s.get("receipt_emoji", DEFAULT_RECEIPT_EMOJI))
+    receipt_emoji_view = "🎲 عشوائي" if receipt_value.lower() == RECEIPT_EMOJI_RANDOM else receipt_value
+    receipt_label = f"{receipt_emoji_view} · {'مفعّل' if receipt_on else 'معطّل'}"
+    arabic_on = bool(s.get("arabic_commands_enabled", True))
+    arabic_style = "success" if arabic_on else "danger"
+    arabic_label = "مفعّلة" if arabic_on else "معطّلة"
+    warn_on, warn_max, _ = warn_settings()
+    warn_style = "success" if warn_on else "danger"
+    warn_label = f"مفعّل · الحد {warn_max}" if warn_on else "معطّل"
     global_pin = _global_pin_data()
     global_pin_active = bool(
         global_pin.get("source_message_id") or global_pin.get("targets")
@@ -717,6 +912,14 @@ def owner_panel_keyboard():
         [_mk_btn(f"🤖 الرد التلقائي — {auto_label[2:]}", style=auto_style, callback_data="auto_reply_menu")],
         [_mk_btn(f"⚡ الرد السريع — {quick_label[2:]}", style=quick_style, callback_data="quick_reply_menu")],
         [_mk_btn(f"🤖 الرد بالذكاء الاصطناعي — {ai_label[2:]}", style=ai_style, callback_data="ai_reply_menu")],
+        [_mk_btn(f"🪞 عكس التفاعلات — {mirror_label}", style=mirror_style,
+                 callback_data="toggle_reaction_mirror")],
+        [_mk_btn(f"🎯 إيموجي الاستلام — {receipt_label}", style=receipt_style,
+                 callback_data="receipt_emoji_menu")],
+        [_mk_btn(f"🇸🇦 الأوامر العربية — {arabic_label}", style=arabic_style,
+                 callback_data="arabic_cmd_menu")],
+        [_mk_btn(f"⚠️ نظام الإنذارات — {warn_label}", style=warn_style,
+                 callback_data="warn_menu")],
         [_mk_btn(protect_label, style=protect_style, callback_data="toggle_protect_content")],
         [_mk_btn("🔄 إعادة الإعدادات للأصل", style="danger", callback_data="reset_settings")],
     ]
@@ -792,6 +995,15 @@ def _user_action_keyboard(uid: int, source_message_id: int | None = None):
         callback_data=f"snooze_pick:{uid}",
     )
     pin_label = "📍 إلغاء التثبيت عندي" if state.get("pinned") else "📌 تثبيت عندي"
+    warn_count = get_warn_count(uid)
+    _, warn_max, warn_enabled = warn_settings()
+    warn_row = [
+        _mk_btn(f"⚠️ إنذار ({warn_count}/{warn_max})", style="danger",
+                callback_data=f"warn:{uid}"),
+    ]
+    if warn_count > 0:
+        warn_row.append(_mk_btn("↩️ إلغاء إنذار", style="primary",
+                                callback_data=f"warn_undo:{uid}"))
     rows = [
         [
             _mk_btn("👤 معلومات", style="primary", callback_data=f"user_card:{uid}"),
@@ -801,10 +1013,12 @@ def _user_action_keyboard(uid: int, source_message_id: int | None = None):
         [
             _mk_btn(pin_label, style="primary", callback_data=f"pin:{uid}"),
         ],
-        [
-            _mk_btn("🗑 حذف الكل", style="danger", callback_data=f"clear_prompt:{uid}"),
-        ],
     ]
+    if warn_enabled:
+        rows.append(warn_row)
+    rows.append([
+        _mk_btn("🗑 حذف الكل", style="danger", callback_data=f"clear_prompt:{uid}"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -826,6 +1040,14 @@ def _user_card_text(uid: int, info: dict, heading: str = "👤 بطاقة الم
             f"{display_time(item.get('at', 0))}"
         )
     audit_text = "\n".join(audit_lines) or "لا يوجد"
+    _, warn_max, warn_enabled = warn_settings()
+    warn_line = (
+        f"⚠️ الإنذارات: {warn_progress_text(get_warn_count(uid), warn_max)}\n"
+        if warn_enabled else ""
+    )
+    last_warn = state.get("last_warn_reason") or ""
+    if warn_enabled and last_warn:
+        warn_line += f"   آخر سبب: {html.escape(str(last_warn))}\n"
     return (
         f"{heading}\n\n"
         f"الاسم: <b>{_safe(info.get('full_name'), 'مجهول')}</b>\n"
@@ -833,6 +1055,7 @@ def _user_card_text(uid: int, info: dict, heading: str = "👤 بطاقة الم
         f"الآيدي: <code>{uid}</code>\n"
         f"البايو: {bio}\n\n"
         f"الحالة: {icon} <b>{html.escape(status)}</b>\n"
+        f"{warn_line}"
         f"📊 الرسائل: <b>{int(stats.get('message_count', 0))}</b>\n"
         f"آخر تواصل: {display_time(stats.get('last_contact', 0))}\n"
         f"آخر رد: {display_time(stats.get('last_reply', 0))}\n"
@@ -1076,7 +1299,8 @@ def _ban_duration_text(record: dict) -> str:
 
 
 async def _apply_ban(
-    ctx, uid: int, reason: str = "", duration_key: str = "permanent"
+    ctx, uid: int, reason: str = "", duration_key: str = "permanent",
+    notify: bool = True,
 ):
     seconds, duration_label = BAN_OPTIONS.get(duration_key, BAN_OPTIONS["permanent"])
     now = time.time()
@@ -1099,6 +1323,8 @@ async def _apply_ban(
         "حظر",
         f"السبب: {reason} | المدة: {duration_label}",
     )
+    if not notify:
+        return
     try:
         duration_text = (
             "بدون انتهاء — حتى فك يدوي"
@@ -1121,6 +1347,9 @@ async def _apply_unban(ctx, uid: int):
     record = records.pop(str(uid), None)
     save_ban_records(records)
     _cancel_ban_expiry_jobs(ctx.job_queue, uid)
+    # فك الحظر يفتح صفحة جديدة: تصفير الإنذارات حتى لا يُحظر فوراً مجدداً.
+    if get_warn_count(uid):
+        update_user_state(uid, warn_count=0, warn_ack_at=0)
     details = ""
     if record:
         details = f"الحظر السابق — السبب: {record.get('reason', '—')}"
@@ -1150,6 +1379,9 @@ async def expire_ban(ctx: ContextTypes.DEFAULT_TYPE):
 
     records.pop(str(uid), None)
     save_ban_records(records)
+    # انتهاء الحظر = بداية جديدة: تصفير الإنذارات مثل فك الحظر اليدوي.
+    if get_warn_count(uid):
+        update_user_state(uid, warn_count=0, warn_ack_at=0)
     append_audit(uid, "انتهاء الحظر", f"السبب: {record.get('reason', '—')}")
     try:
         notice = await ctx.bot.send_message(
@@ -1161,10 +1393,269 @@ async def expire_ban(ctx: ContextTypes.DEFAULT_TYPE):
         pass
 
 
-async def _apply_mute(ctx, uid: int):
-    until = time.time() + 24 * 3600
+async def _apply_mute(ctx, uid: int, hours: float = 24):
+    hours = max(1 / 60, float(hours or 24))
+    until = time.time() + hours * 3600
     update_user_state(uid, muted_until=until)
-    append_audit(uid, "كتم", "24 ساعة")
+    label = f"{hours:g} ساعة" if hours != 24 else "24 ساعة"
+    append_audit(uid, "كتم", label)
+    return until, label
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ⚠️ نظام الإنذارات — عدّاد محفوظ + رسالة مخصصة + حظر تلقائي عند الحد
+# ═══════════════════════════════════════════════════════════════
+
+def warn_settings() -> tuple[bool, int, bool]:
+    """(مفعّل؟، الحد الأقصى للإنذارات، حظر تلقائي عند الحد؟)"""
+    s = load_settings()
+    try:
+        warn_max = max(1, int(s.get("warn_max", DEFAULT_WARN_MAX)))
+    except (TypeError, ValueError):
+        warn_max = DEFAULT_WARN_MAX
+    return (
+        bool(s.get("warn_enabled", True)),
+        warn_max,
+        bool(s.get("warn_auto_ban", True)),
+    )
+
+
+def get_warn_count(uid: int) -> int:
+    try:
+        return max(0, int(get_user_state(uid).get("warn_count", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def warn_progress_text(count: int, warn_max: int) -> str:
+    """شريط مرئي نظيف يوضح العدد: ⚠️⚠️▫️ (2/3)"""
+    warn_max = max(1, int(warn_max))
+    count = max(0, min(int(count), warn_max))
+    return "⚠️" * count + "▫️" * (warn_max - count) + f" <b>({count}/{warn_max})</b>"
+
+
+def _mention_from_info(uid: int, info: dict) -> str:
+    """منشن HTML للمستخدم من بيانات البطاقة (بدون الحاجة لكائن User)."""
+    name = html.escape(str(info.get("full_name") or "مجهول"))
+    if info.get("username"):
+        return f'<a href="https://t.me/{info["username"]}">{name}</a>'
+    return f'<a href="tg://user?id={int(uid)}">{name}</a>'
+
+
+def _render_template(template: str, mapping: dict) -> str:
+    """
+    استبدال آمن للـ placeholders — لا نستخدم str.format لأن نصوص المالك
+    قد تحتوي على {ID} لإيموجي بريميوم وده كان هيرمي KeyError.
+    """
+    text = template or ""
+    for key, value in mapping.items():
+        text = text.replace("{" + key + "}", str(value))
+    return text
+
+
+def _warn_card_keyboard(uid: int, count: int, warn_max: int, acked: bool = False):
+    rows = [
+        [_mk_btn(f"⚠️ الإنذار {count} من {warn_max}", style="danger", callback_data="noop")],
+    ]
+    if acked:
+        rows.append([_mk_btn("✅ تم استلام الإنذار", style="success", callback_data="noop")])
+    else:
+        rows.append([_mk_btn("✅ تم الاستلام", style="success",
+                             callback_data=f"warn_ack:{uid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _warn_owner_keyboard(uid: int, count: int, warn_max: int, banned: bool = False):
+    rows = []
+    if count > 0:
+        rows.append([
+            _mk_btn("↩️ إلغاء آخر إنذار", style="primary", callback_data=f"warn_undo:{uid}"),
+        ])
+    if not banned:
+        rows.append([
+            _mk_btn("🚫 حظر الآن", style="danger", callback_data=f"do_ban:{uid}"),
+        ])
+    rows.append([
+        _mk_btn("👤 بطاقة المستخدم", style="primary", callback_data=f"user_card:{uid}"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _apply_warn(ctx, uid: int, reason: str = "", source_message_id: int | None = None) -> dict:
+    """
+    يوجّه إنذاراً للمستخدم: يزيد العدّاد، يبعتله رسالة بشكل مخصص ونظيف مع زر
+    «تم الاستلام»، وعند الوصول للحد الأقصى (افتراضياً 2) يحظره تلقائياً
+    حظراً دائماً ويعلم المالك بكل خطوة.
+    """
+    enabled, warn_max, auto_ban = warn_settings()
+    if not enabled:
+        try:
+            await ctx.bot.send_message(
+                OWNER_ID,
+                "⚠️ نظام الإنذارات معطّل حالياً.\nفعّله من لوحة التحكم ← ⚠️ نظام الإنذارات.",
+            )
+        except TelegramError:
+            pass
+        return {"ok": False, "count": get_warn_count(uid), "final": False}
+
+    reason = (reason or "").strip() or DEFAULT_WARN_REASON
+    count = get_warn_count(uid) + 1
+    is_final = bool(auto_ban and count >= warn_max)
+
+    update_user_state(
+        uid,
+        warn_count=count,
+        last_warn_at=time.time(),
+        last_warn_reason=reason,
+        warn_ack_at=0,
+    )
+    append_audit(uid, "إنذار", f"{count}/{warn_max} — السبب: {reason}")
+
+    info = await _fetch_user_info(ctx, uid)
+    settings = load_settings()
+    user_text = render_premium_emojis(_render_template(
+        settings.get("warn_message", DEFAULT_WARN_MESSAGE),
+        {
+            "user_link": _mention_from_info(uid, info),
+            "name": html.escape(str(info.get("full_name") or "مجهول")),
+            "reason": html.escape(reason),
+            "count": count,
+            "max": warn_max,
+            "remaining": max(0, warn_max - count),
+            "progress": warn_progress_text(count, warn_max),
+            "footer": DEFAULT_WARN_FINAL_FOOTER if is_final else DEFAULT_WARN_FOOTER,
+            "time": display_time(time.time()),
+        },
+    ))
+
+    sent = None
+    try:
+        sent = await ctx.bot.send_message(
+            uid,
+            user_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_warn_card_keyboard(uid, count, warn_max),
+            **protect_kwargs(uid),
+        )
+        record_message(uid, "user", sent.message_id, "warn_notice")
+    except TelegramError as e:
+        logger.error(f"تعذر إرسال الإنذار للمستخدم {uid}: {e}")
+        # لو التنسيق المخصص من المالك فيه وسم غلط نبعت نسخة بسيطة مضمونة.
+        try:
+            sent = await ctx.bot.send_message(
+                uid,
+                f"⚠️ إنذار ({count} من {warn_max})\nالسبب: {reason}",
+                reply_markup=_warn_card_keyboard(uid, count, warn_max),
+                **protect_kwargs(uid),
+            )
+            record_message(uid, "user", sent.message_id, "warn_notice")
+        except TelegramError:
+            sent = None
+
+    if is_final:
+        await _apply_ban(
+            ctx, uid,
+            reason=f"استيفاء عدد الإنذارات ({warn_max}) — آخر سبب: {reason}",
+            duration_key="permanent",
+            notify=False,
+        )
+        append_audit(uid, "حظر تلقائي", f"بعد {count} إنذار (الحد: {warn_max})")
+
+    owner_lines = [
+        "⚠️ <b>تم توجيه إنذار</b>\n",
+        f"👤 {_mention_from_info(uid, info)} — <code>{uid}</code>",
+        f"📝 السبب: {html.escape(reason)}",
+        f"🚦 الإنذارات: {warn_progress_text(count, warn_max)}",
+    ]
+    if is_final:
+        owner_lines.append("\n⛔ <b>تم حظره تلقائياً (حظر دائم)</b> لاستيفاء عدد الإنذارات.")
+    elif sent is None:
+        owner_lines.append("\n⚠️ تعذّر إيصال رسالة الإنذار للمستخدم (غالباً حاظر البوت).")
+
+    kwargs = dict(
+        chat_id=OWNER_ID,
+        text="\n".join(owner_lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=_warn_owner_keyboard(uid, count, warn_max, banned=is_final),
+    )
+    if source_message_id:
+        kwargs["reply_parameters"] = make_rp(source_message_id)
+    try:
+        card = await ctx.bot.send_message(**kwargs)
+        record_message(uid, "owner", card.message_id, "warn_card")
+    except TelegramError as e:
+        logger.error(f"تعذر إرسال بطاقة الإنذار للمالك {uid}: {e}")
+
+    return {"ok": True, "count": count, "max": warn_max, "final": is_final, "sent": sent}
+
+
+async def _apply_unwarn(ctx, uid: int, notify_user: bool = True) -> int:
+    """ينقص إنذاراً واحداً من سجل المستخدم ويرجع العدّاد الجديد."""
+    enabled, warn_max, _ = warn_settings()
+    count = max(0, get_warn_count(uid) - 1)
+    update_user_state(uid, warn_count=count, warn_ack_at=0)
+    append_audit(uid, "إلغاء إنذار", f"العدد الجديد: {count}/{warn_max}")
+    if notify_user:
+        try:
+            notice = await ctx.bot.send_message(
+                uid,
+                "✅ <b>تم إلغاء إنذار من سجلك</b>\n\n"
+                f"🚦 عدد الإنذارات الحالي: {warn_progress_text(count, warn_max)}",
+                parse_mode=ParseMode.HTML,
+                **protect_kwargs(uid),
+            )
+            record_message(uid, "user", notice.message_id, "unwarn_notice")
+        except TelegramError as e:
+            logger.warning(f"تعذر إشعار المستخدم {uid} بإلغاء الإنذار: {e}")
+    return count
+
+
+def warn_menu_view():
+    """شاشة إعدادات نظام الإنذارات في لوحة التحكم."""
+    enabled, warn_max, auto_ban = warn_settings()
+    status = "🟢 مفعّل" if enabled else "🔴 معطّل"
+    ban_line = (
+        "⛔ حظر دائم تلقائي عند استيفاء العدد"
+        if auto_ban else "🔔 إشعار المالك فقط بدون حظر"
+    )
+    warned = [
+        (uid, get_warn_count(uid))
+        for uid in sorted(load_users())
+        if get_warn_count(uid) > 0
+    ]
+    if warned:
+        warned = warned[-8:]
+        lines = ["\n🧾 <b>آخر مستخدمين عليهم إنذارات:</b>"]
+        for uid, count in warned:
+            lines.append(f"• <code>{uid}</code> — {warn_progress_text(count, warn_max)}")
+    else:
+        lines = ["\nلا يوجد مستخدمون عليهم إنذارات حالياً ✅"]
+
+    text = (
+        "⚠️ <b>نظام الإنذارات</b>\n\n"
+        f"• <b>الحالة:</b> {status}\n"
+        f"• <b>عدد الإنذارات الكلي:</b> {warn_max}\n"
+        f"• <b>عند الوصول للحد:</b> {ban_line}\n\n"
+        "💡 الاستخدام: رد على رسالة العضو المحوّلة بكلمة <b>إنذار</b> "
+        "(أو <b>إنذار السبب هنا</b>)، ومن البطاقة فيه زر ⚠️ إنذار جاهز.\n"
+        "العضو يستلم رسالة بشكل مخصص مع زر ✅ تم الاستلام، ولو ألغيت "
+        "الإنذار بيتم إنقاص العدّاد وإشعاره."
+        + "\n".join(lines)
+    )
+    kb = InlineKeyboardMarkup([
+        [_mk_btn("🔴 تعطيل نظام الإنذارات" if enabled else "🟢 تفعيل نظام الإنذارات",
+                 style="danger" if enabled else "success", callback_data="warn_toggle")],
+        [_mk_btn(f"🔢 تغيير عدد الإنذارات الكلي ({warn_max})", style="primary",
+                 callback_data="warn_max_edit")],
+        [_mk_btn("⛔ الحظر التلقائي عند الحد: مفعّل" if auto_ban
+                 else "🔔 الحظر التلقائي عند الحد: معطّل",
+                 style="danger" if auto_ban else "primary",
+                 callback_data="warn_auto_ban_toggle")],
+        [_mk_btn("✏️ تعديل شكل رسالة الإنذار", style="primary", callback_data="warn_text_edit")],
+        [_mk_btn("🔙 اللوحة", style="primary", callback_data="back_panel")],
+    ])
+    return text, kb
+
 
 
 async def _toggle_pin(ctx, uid: int, message_id: int | None = None):
@@ -1176,19 +1667,41 @@ async def _toggle_pin(ctx, uid: int, message_id: int | None = None):
             pass
         update_user_state(uid, pinned=False, pinned_message_id=None)
         append_audit(uid, "إلغاء التثبيت")
-        return
+        return False
     target_id = message_id
     if not target_id:
         owner_items = _record_ids(uid, "owner")
         target_id = owner_items[-1] if owner_items else None
     if not target_id:
-        return
+        return False
     try:
-        await ctx.bot.pin_chat_message(OWNER_ID, target_id, disable_notification=True)
+        await pin_owner_message(ctx, int(target_id))
         update_user_state(uid, pinned=True, pinned_message_id=target_id)
         append_audit(uid, "تثبيت", f"رسالة {target_id}")
+        return True
     except TelegramError as e:
         logger.warning(f"فشل تثبيت بطاقة المستخدم {uid}: {e}")
+        return False
+
+
+# تثبيت «محلي» في شات المالك فقط: بنسجل رقم الرسالة قبل تثبيتها حتى لا
+# يلتقطها handle_owner_pinned_message ويعمل لها بث عام لجميع المستخدمين
+# (التثبيت العام لازم يكون بقرار صريح من المالك، مش نتيجة ترتيب شاته).
+# ملاحظة: رسالة الخدمة (pinned_message) بتوصلنا بشكل غير متزامن بعد التثبيت،
+# فالرقم بيفضل مسجّل ولا يُحذف فوراً — بنكتفي بتحديد حجم المجموعة.
+_local_pin_ids: set[int] = set()
+_LOCAL_PIN_LIMIT = 300
+
+
+async def pin_owner_message(ctx, message_id: int, disable_notification: bool = True) -> bool:
+    """يثبت رسالة في شات المالك فقط (بدون بثها لجميع المستخدمين)."""
+    while len(_local_pin_ids) >= _LOCAL_PIN_LIMIT:
+        _local_pin_ids.pop()
+    _local_pin_ids.add(int(message_id))
+    await ctx.bot.pin_chat_message(
+        OWNER_ID, int(message_id), disable_notification=disable_notification
+    )
+    return True
 
 
 def _global_pin_data() -> dict:
@@ -1511,6 +2024,17 @@ async def send_owner_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     "🟢 الرد السريع: مفعّل" if s.get("quick_reply_enabled") else "🔴 الرد السريع: معطّل",
                     callback_data="quick_reply_menu")],
                 [InlineKeyboardButton(
+                    "🟢 عكس التفاعلات: مفعّل" if s.get("reactions_mirror_enabled", True) else "🔴 عكس التفاعلات: معطّل",
+                    callback_data="toggle_reaction_mirror")],
+                [InlineKeyboardButton("🎯 إيموجي الاستلام التلقائي",
+                                      callback_data="receipt_emoji_menu")],
+                [InlineKeyboardButton(
+                    "🟢 الأوامر العربية: مفعّلة" if s.get("arabic_commands_enabled", True) else "🔴 الأوامر العربية: معطّلة",
+                    callback_data="arabic_cmd_menu")],
+                [InlineKeyboardButton(
+                    "🟢 نظام الإنذارات: مفعّل" if s.get("warn_enabled", True) else "🔴 نظام الإنذارات: معطّل",
+                    callback_data="warn_menu")],
+                [InlineKeyboardButton(
                     "🟢 حماية المحتوى: مفعّلة" if s.get("protect_content_enabled") else "🔴 حماية المحتوى: معطّلة",
                     callback_data="toggle_protect_content")],
                 [InlineKeyboardButton("🔄 إعادة الإعدادات للأصل", callback_data="reset_settings")],
@@ -1819,6 +2343,102 @@ def ai_reply_menu_view():
     ])
     return text, kb
 
+def receipt_emoji_menu_view():
+    """🎯 شاشة إعدادات إيموجي الاستلام التلقائي."""
+    s = load_settings()
+    enabled = bool(s.get("receipt_emoji_enabled", True))
+    value = str(s.get("receipt_emoji", DEFAULT_RECEIPT_EMOJI))
+    is_random = value.strip().lower() == RECEIPT_EMOJI_RANDOM
+    pool_all = s.get("receipt_emoji_pool") == "all"
+    big = bool(s.get("receipt_emoji_big", False))
+    pool_label = f"كل الـ{len(RECEIPT_EMOJIS)} إيموجي" if pool_all else f"{len(RECEIPT_EMOJIS_FRIENDLY)} إيموجي إيجابي"
+    text = (
+        "🎯 <b>إيموجي الاستلام التلقائي</b>\n\n"
+        f"• <b>الحالة:</b> {'🟢 مفعّل' if enabled else '🔴 معطّل'}\n"
+        f"• <b>الإيموجي المستخدم:</b> {'🎲 عشوائي' if is_random else value}\n"
+        f"• <b>مجموعة العشوائي:</b> {pool_label}\n"
+        f"• <b>حركة التفاعل الكبيرة:</b> {'🟢 مفعّلة' if big else '🔴 معطّلة'}\n\n"
+        "💡 عند التفعيل: أي رسالة يبعتها العضو يتفاعل عليها البوت فوراً "
+        "بالإيموجي المختار — إشعار استلام صامت ونظيف بدون أي رسالة إضافية.\n\n"
+        f"📋 <b>قائمة تيليجرام الرسمية ({len(RECEIPT_EMOJIS)} إيموجي):</b>\n"
+        + " ".join(RECEIPT_EMOJIS)
+        + "\n\n⚠️ أي إيموجي خارج هذه القائمة يرفضه تيليجرام كتفاعل، "
+        "فلو اخترت واحداً منها هيتم تنبيهك والرجوع لـ 👍."
+    )
+    kb = InlineKeyboardMarkup([
+        [_mk_btn("🔴 تعطيل إيموجي الاستلام" if enabled else "🟢 تفعيل إيموجي الاستلام",
+                 style="danger" if enabled else "success", callback_data="receipt_toggle")],
+        [_mk_btn("🎲 التحويل للوضع العشوائي" if not is_random else f"🎯 الرجوع للإيموجي الثابت {DEFAULT_RECEIPT_EMOJI}",
+                 style="primary", callback_data="receipt_random")],
+        [_mk_btn("✏️ اختيار إيموجي ثابت", style="primary", callback_data="receipt_pick")],
+        [_mk_btn(f"🎭 مجموعة العشوائي: {pool_label}", style="primary", callback_data="receipt_pool")],
+        [_mk_btn("✨ حركة التفاعل الكبيرة: مفعّلة" if big else "✨ حركة التفاعل الكبيرة: معطّلة",
+                 style="primary", callback_data="receipt_big")],
+        [_mk_btn("🧪 تجربة الآن", style="success", callback_data="receipt_test")],
+        [_mk_btn("🔙 اللوحة", style="primary", callback_data="back_panel")],
+    ])
+    return text, kb
+
+
+def arabic_cmd_menu_view():
+    """🇸🇦 شاشة الأوامر العربية."""
+    s = load_settings()
+    enabled = bool(s.get("arabic_commands_enabled", True))
+    text = (
+        "🇸🇦 <b>الأسماء العربية للأوامر</b>\n\n"
+        f"الحالة: {'🟢 مفعّلة' if enabled else '🔴 معطّلة'}\n\n"
+        "اعمل رد (Reply) على رسالة العضو المحوّلة واكتب الكلمة، أو اكتب "
+        "الكلمة وبعدها الآيدي مباشرة (مثال: <code>حظر 123456 السبب</code>).\n\n"
+        + ARABIC_COMMAND_HELP
+        + "\n\n⚠️ لو عايز تبعت الكلمة نفسها كرسالة عادية للعضو ابدأ رسالتك "
+        "بعلامة <code>&</code> — مثال: <code>&حظر</code>.\n"
+        "💡 الكتابة متسامحة مع التشكيل والهمزات (إنذار = انذار، تأجيل = تاجيل)."
+    )
+    kb = InlineKeyboardMarkup([
+        [_mk_btn("🔴 تعطيل الأوامر العربية" if enabled else "🟢 تفعيل الأوامر العربية",
+                 style="danger" if enabled else "success", callback_data="arabic_cmd_toggle")],
+        [_mk_btn("⚠️ نظام الإنذارات", style="primary", callback_data="warn_menu")],
+        [_mk_btn("🪞 إعدادات عكس التفاعلات", style="primary", callback_data="toggle_reaction_mirror")],
+        [_mk_btn("🔙 اللوحة", style="primary", callback_data="back_panel")],
+    ])
+    return text, kb
+
+
+async def _edit_query_text(query, text: str, kb=None):
+    """يعدّل نص رسالة الزر بشكل آمن (نص/كابشن) ولو فشل يبعت رسالة جديدة."""
+    try:
+        if getattr(query.message, "photo", None):
+            await query.edit_message_caption(
+                caption=text[:1024], reply_markup=kb, parse_mode=ParseMode.HTML
+            )
+        else:
+            await query.edit_message_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+    except TelegramError:
+        try:
+            await query.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        except TelegramError as e:
+            logger.warning(f"تعذر تحديث رسالة اللوحة: {e}")
+
+
+REACTION_MIRROR_HELP = (
+    "🪞 <b>عكس التفاعلات</b>\n\n"
+    "الحالة: {status}\n\n"
+    "<b>١) المسار الأصلي — تحديثات تيليجرام:</b>\n"
+    "لما تتفاعل على رسالة العضو المحوّلة عندك، البوت يحط نفس التفاعل على "
+    "رسالته الأصلية عنده. والعكس: تفاعل العضو على ردك ينعكس على رسالتك.\n"
+    "⚠️ ملاحظة صريحة: تيليجرام يسلّم تحديثات التفاعل للبوت أساساً في "
+    "المجموعات/القنوات اللي البوت أدمن فيها، وقد لا تصل في المحادثة "
+    "الخاصة (1:1) — استخدم الزر 🧪 للتأكد.\n\n"
+    "<b>٢) المسار البديل المضمون في الشات الخاص:</b>\n"
+    "• رد على رسالة العضو المحوّلة <b>بإيموجي فقط</b> (زي 👍 أو 🔥) → "
+    "يتحوّل لتفاعل فعلي على رسالته الأصلية عنده، بدل ما يتبعتله كرسالة.\n"
+    "• لو العضو رد على ردك بإيموجي فقط → يتحط كتفاعل على رسالتك عندك "
+    "ويوصلك تنبيه 🪞.\n\n"
+    "يدعم الإيموجي الرسمي (67) والإيموجي البريميوم، ومسح التفاعل بيُمسح "
+    "عند الطرف التاني كمان."
+)
+
+
 def quick_reply_menu_view():
     s = load_settings()
     enabled = s.get("quick_reply_enabled", False)
@@ -1942,6 +2562,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # نسجل أمر /start نفسه حتى يدخل في حذف المحادثة لاحقاً.
     record_message(user.id, "user", update.message.message_id, "start")
     s = load_settings()
+    # 🎯 إيموجي الاستلام على أول رسالة من العضو أيضاً (ما لم يكن محظوراً).
+    if user.id not in load_banned():
+        await apply_receipt_emoji(ctx, user.id, update.message.message_id)
     if s.get("quick_reply_enabled"):
         welcome_sent = await update.message.reply_text(
             render_premium_emojis(s.get("quick_reply_msg", DEFAULT_QUICK_REPLY_MSG)),
@@ -2046,6 +2669,34 @@ async def handle_user_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     s = load_settings()
 
+    # ══ 🪞 العضو رد بإيموجي فقط على رد المالك → عكسه على رسالة المالك ══
+    emoji_only = extract_reaction_emojis(msg.text or "")
+    if emoji_only and s.get("reactions_mirror_enabled", True) and msg.reply_to_message:
+        entry = reply_map.get(msg.reply_to_message.message_id)
+        if entry:
+            owner_reply_id, mapped_uid = entry
+            valid = valid_reaction_emojis(emoji_only)
+            if int(mapped_uid) == int(user.id) and valid and await set_reactions(
+                ctx, OWNER_ID, int(owner_reply_id),
+                [ReactionTypeEmoji(e) for e in valid],
+            ):
+                append_audit(user.id, "تفاعل على رد المالك", " ".join(valid))
+                try:
+                    note = await ctx.bot.send_message(
+                        OWNER_ID,
+                        f"🪞 {user_mention(user)} تفاعل بـ {' '.join(valid)} على ردك.",
+                        parse_mode=ParseMode.HTML,
+                        reply_parameters=make_rp(int(owner_reply_id)),
+                    )
+                    record_message(user.id, "owner", note.message_id, "reaction_note")
+                except TelegramError:
+                    pass
+                await apply_receipt_emoji(ctx, user.id, msg.message_id)
+                return
+
+    # ══ 🎯 إيموجي الاستلام التلقائي على رسالة العضو ══
+    await apply_receipt_emoji(ctx, user.id, msg.message_id)
+
     # ══ الرد السريع: أولوية قصوى — يرد بنص واحد ثابت على أي رسالة ══
     if s.get("quick_reply_enabled"):
         quick_sent = await msg.reply_text(
@@ -2115,7 +2766,7 @@ async def handle_user_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ══ إبلاغ المالك أن البوت رد تلقائياً، بنفس شكل تأكيد الرد اليدوي ══
     if auto_item and auto_sent:
-        reply_map[auto_sent.message_id] = (fwd.message_id, user.id)
+        remember_reply(auto_sent.message_id, fwd.message_id, user.id)
         try:
             auto_owner_note = await ctx.bot.send_message(
                 OWNER_ID,
@@ -2179,6 +2830,685 @@ async def handle_user_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             save_msg_map(msg_map)
 
 # ═══════════════════════════════════════════════════════════════
+#  🪞 عكس التفاعلات — أدوات مشتركة
+#
+#  ملاحظة مهمة عن تيليجرام: تحديثات message_reaction الرسمية بتوصل البوت
+#  في المجموعات/القنوات اللي هو أدمن فيها، أما في الشات الخاص (1:1) فقد
+#  لا تصل إطلاقاً لأن البوت لا يمكن أن يكون أدمن في محادثة خاصة. لذلك
+#  الميزة هنا شغّالة بمسارين معاً:
+#    1) المسار الأصلي: تحديث message_reaction (لو وصل) — بيُعكس تلقائياً.
+#    2) مسار بديل مضمون 100% في الشات الخاص: الرد على الرسالة بإيموجي
+#       فقط (زي 👍 أو 🔥) فيتحول لتفاعل فعلي على رسالة الطرف التاني.
+# ═══════════════════════════════════════════════════════════════
+
+_EMOJI_JOINERS = {0x200D, 0xFE0F, 0xFE0E, 0x20E3} | set(range(0x1F3FB, 0x1F400))
+
+
+def _is_emoji_codepoint(cp: int) -> bool:
+    return (
+        0x1F000 <= cp <= 0x1FAFF
+        or 0x2600 <= cp <= 0x27BF
+        or 0x2B00 <= cp <= 0x2BFF
+        or 0x1F1E6 <= cp <= 0x1F1FF
+        or cp in (0x203C, 0x2049, 0x2122, 0x2139, 0x3030, 0x303D, 0x3297, 0x3299)
+    )
+
+
+def extract_reaction_emojis(text: str) -> list[str]:
+    """
+    لو الرسالة كلها إيموجي (من 1 إلى 3) يرجعها كقائمة، وإلا قائمة فاضية.
+    ده اللي بيخلي الرد بإيموجي واحد يشتغل كتفاعل بدل ما يتحوّل كرسالة.
+    """
+    if not text:
+        return []
+    stripped = text.strip()
+    if not stripped or len(stripped) > 40:
+        return []
+    clusters: list[str] = []
+    for ch in stripped:
+        cp = ord(ch)
+        if ch.isspace():
+            continue
+        if cp in _EMOJI_JOINERS:
+            if clusters:
+                clusters[-1] += ch
+            continue
+        if _is_emoji_codepoint(cp):
+            if (
+                clusters
+                and len(clusters[-1]) == 1
+                and 0x1F1E6 <= ord(clusters[-1]) <= 0x1F1FF
+                and 0x1F1E6 <= cp <= 0x1F1FF
+            ):
+                clusters[-1] += ch      # علم دولة = حرفين regional indicators
+                continue
+            clusters.append(ch)
+            continue
+        return []                       # فيه أي حرف/رقم → مش رسالة إيموجي خالص
+    if not clusters or len(clusters) > 3:
+        return []
+    return clusters
+
+
+def to_valid_reaction(emoji: str) -> str | None:
+    """يطابق الإيموجي مع قائمة تيليجرام الرسمية (67) بشكل متسامح مع FE0F."""
+    if not emoji:
+        return None
+    if emoji in RECEIPT_EMOJIS:
+        return emoji
+    stripped = emoji.replace("\ufe0f", "").replace("\ufe0e", "")
+    for candidate in RECEIPT_EMOJIS:
+        if candidate.replace("\ufe0f", "") == stripped:
+            return candidate
+    return None
+
+
+def valid_reaction_emojis(emojis: list[str]) -> list[str]:
+    result = []
+    for emoji in emojis:
+        mapped = to_valid_reaction(emoji)
+        if mapped and mapped not in result:
+            result.append(mapped)
+    return result[:3]
+
+
+async def set_reactions(ctx, chat_id: int, message_id: int, reactions: list) -> bool:
+    """
+    يضع تفاعلاً على رسالة. البوت غير المشترك في بريميوم مسموح له بتفاعل واحد،
+    فلما تفشل المحاولة بعدة تفاعلات نعيد المحاولة بأول واحد فقط.
+    """
+    if not message_id:
+        return False
+    reactions = list(reactions)
+    if not reactions:                                   # إزالة التفاعل
+        try:
+            await ctx.bot.set_message_reaction(chat_id=chat_id, message_id=int(message_id))
+            return True
+        except TelegramError as e:
+            logger.warning(f"تعذر مسح التفاعل {chat_id}/{message_id}: {e}")
+            return False
+    for attempt in (reactions, reactions[:1]):
+        try:
+            await ctx.bot.set_message_reaction(
+                chat_id=chat_id, message_id=int(message_id), reaction=attempt
+            )
+            return True
+        except TelegramError as e:
+            logger.warning(f"تعذر وضع التفاعل على {chat_id}/{message_id}: {e}")
+    return False
+
+
+def _reaction_types_from(new_reaction) -> list:
+    """يحوّل تفاعلات تحديث message_reaction لكائنات جاهزة لإعادة الاستخدام."""
+    types = []
+    for item in new_reaction or []:
+        kind = getattr(item, "type", "emoji")
+        if kind == "custom_emoji" and getattr(item, "custom_emoji_id", None):
+            types.append(ReactionTypeCustomEmoji(custom_emoji_id=item.custom_emoji_id))
+        else:
+            emoji = getattr(item, "emoji", None)
+            if emoji:
+                types.append(ReactionTypeEmoji(emoji))
+    return types
+
+
+async def _mirror_emoji_reply_to_user(ctx, msg, uid: int, user_msg_id: int | None,
+                                      emojis: list[str]) -> bool:
+    """المالك رد بإيموجي فقط على رسالة العضو → يتحط كتفاعل فعلي عنده."""
+    valid = valid_reaction_emojis(emojis)
+    if not valid or not user_msg_id:
+        return False
+    ok = await set_reactions(ctx, uid, int(user_msg_id),
+                             [ReactionTypeEmoji(e) for e in valid])
+    if not ok:
+        return False
+    append_audit(uid, "تفاعل معكوس", " ".join(valid))
+    info = await _fetch_user_info(ctx, uid)
+    try:
+        note = await ctx.bot.send_message(
+            OWNER_ID,
+            f"🪞 تم عكس التفاعل {' '.join(valid)} على رسالة "
+            f"{_mention_from_info(uid, info)}.",
+            parse_mode=ParseMode.HTML,
+            reply_parameters=make_rp(msg.message_id),
+        )
+        record_message(uid, "owner", note.message_id, "reaction_note")
+    except TelegramError:
+        pass
+    return True
+
+
+# ═══════════════════════════════════════════════════════════════
+#  🇸🇦 أسماء عربية للأوامر — كلمة واحدة بالرد على رسالة العضو = أمر
+# ═══════════════════════════════════════════════════════════════
+
+_AR_TASHKEEL_RE = re.compile(r"[\u064B-\u065F\u0670\u0640\u06D6-\u06ED\u0640]")
+_AR_TRANSLATE_MAP = str.maketrans({
+    "أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ٲ": "ا", "ٳ": "ا",
+    "ى": "ي", "ئ": "ي", "ؤ": "و", "ة": "ه",
+    "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4",
+    "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9",
+})
+
+
+def _normalize_ar(text: str) -> str:
+    """توحيد الكتابة العربية للمطابقة (تشكيل/تطويل/همزات/ياء/تاء مربوطة/أرقام)."""
+    cleaned = _AR_TASHKEEL_RE.sub("", text or "")
+    cleaned = cleaned.translate(_AR_TRANSLATE_MAP)
+    return re.sub(r"\s+", " ", cleaned).strip().lower()
+
+
+ARABIC_COMMANDS: dict[str, tuple[str, ...]] = {
+    "ban":        ("حظر", "احظر", "حظره", "بان", "طرد", "اطرد", "طرده"),
+    "unban":      ("فك حظر", "فك الحظر", "الغاء حظر", "الغاء الحظر", "رفع حظر",
+                   "رفع الحظر", "فك", "الغاء الطرد", "فك البان"),
+    "warn":       ("انذار", "انذره", "تحذير", "حذره", "انذاره", "وجه انذار"),
+    "unwarn":     ("الغاء الانذار", "الغاء انذار", "رفع الانذار", "مسح الانذار",
+                   "تقليل الانذار", "الغاء التحذير"),
+    "global_pin": ("تثبيت عام", "تثبيت للجميع", "تثبيت الكل", "بث وتثبيت",
+                   "تثبيت عند الجميع"),
+    "pin":        ("تثبيت", "ثبت", "ثبتها", "تثبيت عندي"),
+    "unpin":      ("الغاء التثبيت", "فك التثبيت", "الغاء تثبيت", "شيل التثبيت"),
+    "snooze":     ("تاجيل", "اجل", "اجلها", "بعدين", "ذكرني", "تاجيلها"),
+    "mute":       ("كتم", "اكتم", "كتمه", "اسكت"),
+    "unmute":     ("الغاء الكتم", "فك الكتم", "الغاء كتم"),
+    "info":       ("معلومات", "بطاقه", "تفاصيل", "بروفايل", "من هذا", "من هو",
+                   "مين هذا", "معلوماته"),
+    "clear":      ("حذف", "احذف", "مسح", "امسح", "حذف الكل", "حذف المحادثه"),
+    "forward":    ("تحويل", "حول", "اعاده توجيه", "حوّل"),
+    "silent":     ("صامت", "ارسال صامت", "بدون رد", "ا", "أ"),
+}
+
+# أوامر عامة (مالهاش علاقة بعضو معين) — تشتغل فقط من غير ما ترد على رسالة،
+# حتى لا تبتلع رسالة عادية المالك بيبعتها لعضو.
+ARABIC_GLOBAL_COMMANDS: dict[str, tuple[str, ...]] = {
+    "panel":   ("لوحة التحكم", "اللوحه", "لوحه التحكم", "الاعدادات", "اعدادات",
+                "بدء التشغيل", "القائمه الرئيسيه"),
+    "help":    ("الاوامر", "ال اوامر", "المساعده", "مساعده", "الاوامر العربيه"),
+    "backup":  ("نسخه احتياطيه", "نسخ احتياطي", "باك اب", "نسخه"),
+    "restore": ("استعاده", "استرجاع", "استعاد النسخه"),
+    "cancel":  ("الغاء", "تراجع", "الغاء العمليه"),
+}
+
+# فهرس مرتب من الأطول للأقصر حتى تسبق «فك حظر» كلمة «حظر» و«تثبيت عام» كلمة «تثبيت».
+_AR_ALIAS_INDEX: list[tuple[str, str]] = sorted(
+    (
+        (_normalize_ar(alias), action)
+        for action, aliases in ARABIC_COMMANDS.items()
+        for alias in aliases
+    ),
+    key=lambda item: (-len(item[0].split()), -len(item[0])),
+)
+
+_AR_GLOBAL_ALIAS_INDEX: list[tuple[str, str]] = sorted(
+    (
+        (_normalize_ar(alias), action)
+        for action, aliases in ARABIC_GLOBAL_COMMANDS.items()
+        for alias in aliases
+    ),
+    key=lambda item: (-len(item[0].split()), -len(item[0])),
+)
+
+# فهرس موحّد (عام + أعضاء) حتى تكسب العبارة الأطول دائماً:
+# «الغاء الحظر» تسبق «الغاء» العامة.
+_AR_COMBINED_INDEX: list[tuple[str, str]] = sorted(
+    _AR_ALIAS_INDEX + _AR_GLOBAL_ALIAS_INDEX,
+    key=lambda item: (-len(item[0].split()), -len(item[0])),
+)
+
+ARABIC_COMMAND_HELP = (
+    "🚫 <b>حظر</b> — <code>حظر</code> أو <code>حظر السبب هنا</code>\n"
+    "✅ <b>فك حظر</b> — <code>فك حظر</code>\n"
+    "⚠️ <b>إنذار</b> — <code>إنذار</code> أو <code>إنذار السبب هنا</code>\n"
+    "↩️ <b>إلغاء إنذار</b> — <code>الغاء الانذار</code>\n"
+    "📌 <b>تثبيت</b> (عندك فقط) — <code>تثبيت</code>\n"
+    "📌 <b>تثبيت عام</b> (للجميع) — <code>تثبيت عام</code>\n"
+    "📍 <b>إلغاء التثبيت</b> — <code>الغاء التثبيت</code>\n"
+    "⏰ <b>تأجيل</b> — <code>تأجيل</code> أو <code>تأجيل 3 ساعات</code>\n"
+    "🔇 <b>كتم</b> — <code>كتم</code> أو <code>كتم 6 ساعات</code>\n"
+    "🔊 <b>إلغاء الكتم</b> — <code>الغاء الكتم</code>\n"
+    "👤 <b>معلومات</b> — <code>معلومات</code> / <code>بطاقة</code>\n"
+    "🗑 <b>حذف المحادثة</b> — <code>حذف</code>\n"
+    "↪️ <b>تحويل</b> — <code>تحويل 123456</code>\n"
+    "🤫 <b>إرسال صامت</b> — <code>صامت</code> (أو <code>ا</code> / <code>أ</code>)\n"
+    "🪞 <b>تفاعل</b> — رد بإيموجي فقط (زي 👍) فيتحوّل لتفاعل على رسالة العضو\n\n"
+    "🧭 <b>أوامر عامة (بدون رد على رسالة):</b>\n"
+    "⚙️ <code>لوحة التحكم</code> · 📖 <code>الأوامر</code> · "
+    "📦 <code>نسخة احتياطية</code> · 📥 <code>استعادة</code> · ❌ <code>الغاء</code>"
+)
+
+_AR_UNITS = {
+    "دقيقه": 60, "دقائق": 60, "دقايق": 60,
+    "ساعه": 3600, "ساعات": 3600,
+    "يوم": 86400, "ايام": 86400,
+    "اسبوع": 604800, "اسابيع": 604800,
+    "شهر": 2592000, "شهور": 2592000, "اشهر": 2592000,
+}
+_AR_SINGLE_UNITS = {
+    "دقيقتين": 120, "ساعتين": 7200, "يومين": 172800,
+    "اسبوعين": 1209600, "شهرين": 5184000,
+}
+_AR_TOMORROW = {"غدا": 86400, "بكره": 86400, "بكرا": 86400, "الغد": 86400}
+
+
+def parse_arabic_duration(text: str) -> int | None:
+    """يحوّل «3 ساعات / يومين / أسبوع / غداً / 4h / 3d» إلى ثواني."""
+    norm = _normalize_ar(text or "")
+    if not norm:
+        return None
+    if norm in _AR_TOMORROW:
+        return _AR_TOMORROW[norm]
+    if norm in _AR_SINGLE_UNITS:
+        return _AR_SINGLE_UNITS[norm]
+    match = re.match(r"^(\d+)\s*([a-z\u0600-\u06FF]+)$", norm)
+    if match:
+        number, unit = int(match.group(1)), match.group(2)
+        if unit in _AR_UNITS:
+            return number * _AR_UNITS[unit]
+        if unit in ("h", "s", "d", "w", "m"):
+            return number * {"h": 3600, "s": 1, "d": 86400, "w": 604800, "m": 60}[unit]
+    if norm in _AR_UNITS:
+        return _AR_UNITS[norm]
+    return None
+
+
+def format_duration_ar(seconds: int) -> str:
+    seconds = int(seconds or 0)
+    if seconds <= 0:
+        return "—"
+    if seconds < 3600:
+        return f"{max(1, seconds // 60)} دقيقة"
+    if seconds < 86400:
+        hours = seconds / 3600
+        return f"{hours:g} ساعة"
+    days = seconds / 86400
+    return f"{days:g} يوم"
+
+
+def match_arabic_command(text: str, allow_global: bool = False) -> tuple[str, str] | None:
+    """يرجع (اسم الأمر، الباقي كوسيط) لو النص يبدأ بكلمة أمر عربية معروفة."""
+    if not text:
+        return None
+    raw_tokens = text.strip().split()
+    if not raw_tokens:
+        return None
+    norm_tokens = [_normalize_ar(token) for token in raw_tokens]
+    for alias, action in (_AR_COMBINED_INDEX if allow_global else _AR_ALIAS_INDEX):
+        alias_tokens = alias.split()
+        if (
+            len(norm_tokens) >= len(alias_tokens)
+            and norm_tokens[: len(alias_tokens)] == alias_tokens
+        ):
+            args = " ".join(raw_tokens[len(alias_tokens):]).strip()
+            return action, args
+    return None
+
+
+async def _resolve_arabic_target(ctx, msg, args: str) -> tuple[int | None, str]:
+    """
+    يحدد العضو المستهدف: من الرسالة المردود عليها، أو من آيدي/يوزر مكتوب
+    بعد كلمة الأمر (مثال: «حظر 123456» أو «حظر @username» بدون رد).
+    """
+    uid = None
+    if msg.reply_to_message:
+        uid = _target_user_from_owner_message(msg)
+    tokens = args.split()
+    if uid is None and tokens:
+        first = tokens[0]
+        if re.fullmatch(r"\d{4,}", first):
+            uid = int(first)
+            args = " ".join(tokens[1:]).strip()
+        elif first.startswith("@") and len(first) > 1:
+            try:
+                chat = await ctx.bot.get_chat(first)
+                uid = int(chat.id)
+                args = " ".join(tokens[1:]).strip()
+            except TelegramError:
+                uid = None
+    return uid, args
+
+
+def _snooze_keyboard(uid: int):
+    return InlineKeyboardMarkup([
+        [
+            _mk_btn("1 ساعة", style="primary", callback_data=f"snooze:{uid}:1h"),
+            _mk_btn("4 ساعات", style="primary", callback_data=f"snooze:{uid}:4h"),
+        ],
+        [
+            _mk_btn("غداً", style="primary", callback_data=f"snooze:{uid}:tomorrow"),
+            _mk_btn("بعد 3 أيام", style="primary", callback_data=f"snooze:{uid}:3d"),
+        ],
+        [
+            _mk_btn("أسبوع", style="primary", callback_data=f"snooze:{uid}:week"),
+            _mk_btn("👤 البطاقة", style="primary", callback_data=f"user_card:{uid}"),
+        ],
+    ])
+
+
+async def handle_arabic_command(update, ctx, msg) -> bool:
+    """
+    ينفّذ الأمر العربي لو رسالة المالك تبدأ بكلمة معروفة.
+    يرجع True لو استهلك الرسالة (وبالتالي لا تُحوّل للعضو كنص عادي).
+    """
+    if not msg or msg.chat_id != OWNER_ID:
+        return False
+    if not msg.from_user or int(msg.from_user.id) != int(OWNER_ID):
+        return False
+    settings = load_settings()
+    if not settings.get("arabic_commands_enabled", True):
+        return False
+    text = (msg.text or msg.caption or "").strip()
+    if not text or text.startswith("/"):
+        return False
+    matched = match_arabic_command(text, allow_global=not msg.reply_to_message)
+    if not matched:
+        return False
+    action, args = matched
+
+    # ── أوامر عامة (مالك + بوت، مش مرتبطة بعضو) ──────────────────
+    if action in ARABIC_GLOBAL_COMMANDS:
+        if action == "panel":
+            await send_owner_panel(update, ctx)
+        elif action == "help":
+            menu_text, kb = arabic_cmd_menu_view()
+            await msg.reply_text(menu_text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        elif action == "backup":
+            await cmd_backup(update, ctx)
+        elif action == "restore":
+            await msg.reply_text(
+                "📥 <b>استعادة نسخة احتياطية</b>\n\n"
+                "ابعت ملف الـ JSON واكتب <code>/restore</code> في نفس الرسالة "
+                "(في الكابشن)، أو ابعت <code>/restore</code> رداً على الملف.",
+                parse_mode=ParseMode.HTML,
+            )
+        elif action == "cancel":
+            await cancel(update, ctx)
+        return True
+
+    # ── أوامر لا تحتاج عضواً محدداً ───────────────────────────────
+    if action == "global_pin":
+        replied = msg.reply_to_message
+        if not replied or replied.message_id in msg_map:
+            await msg.reply_text(
+                "⚠️ التثبيت العام يكون بالرد على <b>رسالتك أنت</b> (مش رسالة عضو محوّلة).\n"
+                "اكتب الرسالة اللي عايزها توصل للجميع وثبّتها، أو رد عليها بكلمة "
+                "<code>تثبيت عام</code>.",
+                parse_mode=ParseMode.HTML,
+            )
+            return True
+        users_count = len(load_users() - load_banned() - {OWNER_ID})
+        await msg.reply_text(
+            "📌 <b>تثبيت عام</b>\n\n"
+            f"سيتم نسخ هذه الرسالة وتثبيتها عند <b>{users_count}</b> مستخدم "
+            "(وحذف النسخة العامة السابقة).\n\nهل تريد المتابعة؟",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [_mk_btn("📌 نعم، أرسلها وثبّتها للجميع", style="success",
+                         callback_data=f"global_pin_yes:{replied.message_id}")],
+                [_mk_btn("إلغاء", style="danger", callback_data="noop")],
+            ]),
+        )
+        return True
+
+    uid, args = await _resolve_arabic_target(ctx, msg, args)
+    if not uid:
+        await msg.reply_text(
+            "⚠️ لم أحدد المستخدم المستهدف.\n"
+            "اعمل رد (Reply) على رسالة العضو المحوّلة واكتب الكلمة، "
+            "أو اكتب الآيدي بعدها — مثال: <code>حظر 123456789 سبب الحظر</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+    uid = int(uid)
+
+    if uid == OWNER_ID:
+        await msg.reply_text("⚠️ لا يمكن تنفيذ هذا الأمر على نفسك.")
+        return True
+
+    if uid in load_banned() and action not in ("unban", "info", "clear"):
+        await msg.reply_text(
+            "🚫 هذا المستخدم محظور بالفعل.\n"
+            "اكتب <code>فك حظر</code> بالرد على رسالته لإلغاء الحظر، "
+            "أو <code>معلومات</code> لعرض بطاقته.",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+
+    info = await _fetch_user_info(ctx, uid)
+    name = html.escape(str(info.get("full_name") or "مجهول"))
+
+    # ── حظر ──────────────────────────────────────────────────────
+    if action == "ban":
+        if args:
+            await _send_ban_confirmation_with_reason(
+                ctx, OWNER_ID, uid, reason=args, reply_to=msg.message_id
+            )
+            return True
+        ctx.user_data["ban_reason_target"] = uid
+        await msg.reply_text(
+            f"✍️ اكتب <b>سبب حظر</b> {name} الآن في رسالة منفصلة.\n\n"
+            "السبب هيظهر للعضو في رسالة الحظر وهيتحفظ في السجل.\n"
+            "أرسل /cancel للإلغاء.",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+
+    # ── فك حظر ────────────────────────────────────────────────────
+    if action == "unban":
+        await _apply_unban(ctx, uid)
+        await msg.reply_text(
+            f"✅ تم رفع الحظر عن {name} — <code>{uid}</code>\n"
+            "🧹 تم تصفير إنذاراته أيضاً (صفحة جديدة).",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+
+    # ── إنذار ────────────────────────────────────────────────────
+    if action == "warn":
+        enabled, warn_max, _ = warn_settings()
+        if not enabled:
+            await msg.reply_text(
+                "⚠️ نظام الإنذارات معطّل حالياً.\n"
+                "فعّله من لوحة التحكم ← ⚠️ نظام الإنذارات."
+            )
+            return True
+        result = await _apply_warn(ctx, uid, reason=args,
+                                   source_message_id=msg.message_id)
+        if not result.get("ok"):
+            return True
+        count = result.get("count", 0)
+        if result.get("final"):
+            await msg.reply_text(
+                f"⛔ وصل {name} للإنذار الأخير ({count}/{warn_max}) "
+                "وتم حظره تلقائياً حظراً دائماً.",
+            )
+        return True
+
+    if action == "unwarn":
+        count = await _apply_unwarn(ctx, uid)
+        _, warn_max, _ = warn_settings()
+        await msg.reply_text(
+            f"↩️ تم إلغاء إنذار من سجل {name}.\n"
+            f"🚦 العدد الحالي: {warn_progress_text(count, warn_max)}",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+
+    # ── تثبيت ────────────────────────────────────────────────────
+    if action == "pin":
+        target_id = msg.reply_to_message.message_id if msg.reply_to_message else None
+        state = get_user_state(uid)
+        if not target_id:
+            owner_items = _record_ids(uid, "owner")
+            target_id = owner_items[-1] if owner_items else None
+        if not target_id:
+            await msg.reply_text("⚠️ لا توجد رسالة محددة لتثبيتها.")
+            return True
+        if state.get("pinned") and int(state.get("pinned_message_id") or 0) == int(target_id):
+            await _toggle_pin(ctx, uid, int(target_id))
+            await msg.reply_text(f"📍 تم إلغاء تثبيت رسالة {name} من شاتك.")
+            return True
+        try:
+            await pin_owner_message(ctx, int(target_id))
+        except TelegramError as e:
+            await msg.reply_text(f"⚠️ تعذر التثبيت: {e}")
+            return True
+        update_user_state(uid, pinned=True, pinned_message_id=int(target_id))
+        append_audit(uid, "تثبيت", f"رسالة {target_id} (بأمر عربي)")
+        await msg.reply_text(
+            f"📌 تم تثبيت رسالة {name} في شاتك فقط (بدون بثّها للمستخدمين).\n"
+            "للتثبيت عند الجميع استخدم <code>تثبيت عام</code> بالرد على رسالتك أنت.",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+
+    if action == "unpin":
+        state = get_user_state(uid)
+        target_id = msg.reply_to_message.message_id if msg.reply_to_message else state.get("pinned_message_id")
+        if not target_id:
+            await msg.reply_text("⚠️ لا توجد رسالة مثبتة لإلغاء تثبيتها.")
+            return True
+        try:
+            await ctx.bot.unpin_chat_message(OWNER_ID, int(target_id))
+        except TelegramError as e:
+            await msg.reply_text(f"⚠️ تعذر إلغاء التثبيت: {e}")
+            return True
+        update_user_state(uid, pinned=False, pinned_message_id=None)
+        append_audit(uid, "إلغاء التثبيت", f"رسالة {target_id} (بأمر عربي)")
+        await msg.reply_text(f"📍 تم إلغاء تثبيت رسالة {name} من شاتك.")
+        return True
+
+    # ── تأجيل ────────────────────────────────────────────────────
+    if action == "snooze":
+        seconds = parse_arabic_duration(args)
+        if not seconds:
+            await msg.reply_text(
+                f"⏰ <b>تأجيل {name}</b>\n\nاختر المدة بضغطة واحدة:",
+                parse_mode=ParseMode.HTML,
+                reply_markup=_snooze_keyboard(uid),
+            )
+            return True
+        until = time.time() + seconds
+        update_user_state(uid, snoozed_until=until, muted_until=0)
+        label = format_duration_ar(seconds)
+        append_audit(uid, "تأجيل", label)
+        _schedule_snooze(ctx.job_queue, uid, until)
+        await msg.reply_text(
+            f"⏰ تم تأجيل {name} لمدة {label} — هيوصلك تذكير في "
+            f"{display_time(until)}.",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+
+    # ── كتم ──────────────────────────────────────────────────────
+    if action == "mute":
+        seconds = parse_arabic_duration(args) or 24 * 3600
+        until, label = await _apply_mute(ctx, uid, hours=seconds / 3600)
+        await msg.reply_text(
+            f"🔇 تم كتم {name} لمدة {label}.\n"
+            "رسائله هتوصل للبوت لكن مش هتظهر عندك، وهيتم تنبيهك لو حاول التواصل.",
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+
+    if action == "unmute":
+        update_user_state(uid, muted_until=0)
+        append_audit(uid, "إلغاء الكتم", "بأمر عربي")
+        await msg.reply_text(f"🔊 تم إلغاء الكتم عن {name}.")
+        return True
+
+    # ── معلومات ──────────────────────────────────────────────────
+    if action == "info":
+        await _send_user_details(ctx, OWNER_ID, uid, reply_to=msg.message_id)
+        return True
+
+    # ── حذف المحادثة ─────────────────────────────────────────────
+    if action == "clear":
+        owner_count, user_count = _clear_counts(uid)
+        await msg.reply_text(
+            f"⚠️ <b>حذف محادثة {name}</b>\n\n"
+            f"من محادثتك: <b>{owner_count}</b> رسالة\n"
+            f"من محادثة العضو: <b>{user_count}</b> رسالة\n\n"
+            "الرسائل الأقدم من 48 ساعة يتجاهلها تيليجرام بصمت.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [_mk_btn("🗑 نعم، احذف الكل", style="danger", callback_data=f"clear_yes:{uid}")],
+                [_mk_btn("إلغاء", style="primary", callback_data="noop")],
+            ]),
+        )
+        return True
+
+    # ── تحويل ────────────────────────────────────────────────────
+    if action == "forward":
+        await _forward_owner_message(ctx, msg, args)
+        return True
+
+    # ── إرسال صامت ───────────────────────────────────────────────
+    if action == "silent":
+        pending_silent[OWNER_ID] = uid
+        await msg.reply_text(
+            f"🤫 وضع الإرسال الصامت مفعّل لـ {name}.\n"
+            "ابعت رسالتك دلوقتي (بدون رد) وهتوصله من غير ما تظهر كرد على رسالته."
+        )
+        return True
+
+    return False
+
+
+async def _forward_owner_message(ctx, msg, args: str):
+    """تحويل رسالة عضو (اللي تم الرد عليها) إلى مستخدم آخر."""
+    if not msg.reply_to_message or msg.reply_to_message.message_id not in msg_map:
+        await msg.reply_text(
+            "⚠️ استخدم <code>تحويل</code> بالرد على الرسالة المحوّلة من العضو، "
+            "واكتب بعدها آيدي المستلم.\nمثال: <code>تحويل 123456789</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    tokens = (args or "").split()
+    if not tokens:
+        await msg.reply_text("⚠️ اكتب آيدي المستخدم اللي عايز تحوّل له الرسالة.")
+        return
+    target = None
+    first = tokens[0]
+    if re.fullmatch(r"\d{4,}", first):
+        target = int(first)
+    elif first.startswith("@") and len(first) > 1:
+        try:
+            chat = await ctx.bot.get_chat(first)
+            target = int(chat.id)
+        except TelegramError:
+            await msg.reply_text("⚠️ لم يُعثر على هذا المستخدم.")
+            return
+    if not target:
+        await msg.reply_text("⚠️ الآيدي غير صحيح.")
+        return
+    source_msg_id = msg.reply_to_message.message_id
+    source_user_id, _ = msg_map[source_msg_id]
+    if target == int(source_user_id):
+        await msg.reply_text("⚠️ هذه الرسالة أصلاً من هذا المستخدم.")
+        return
+    if target in load_banned():
+        await msg.reply_text("⚠️ هذا المستخدم محظور من البوت، لا يمكن التحويل له.")
+        return
+    try:
+        sent = await ctx.bot.copy_message(
+            chat_id=target, from_chat_id=OWNER_ID, message_id=source_msg_id,
+            **protect_kwargs(target),
+        )
+    except TelegramError as e:
+        await msg.reply_text(f"⚠️ فشل تحويل الرسالة: {e}")
+        return
+    remember_reply(sent.message_id, msg.message_id, target)
+    record_message(target, "user", sent.message_id, "forwarded_from_owner")
+    append_audit(target, "رسالة محوّلة", f"من رسالة العضو {source_user_id}")
+    await msg.reply_text(
+        f"✅ تم تحويل الرسالة إلى المستخدم <code>{target}</code> "
+        "(بدون كشف هوية صاحبها الأصلي).",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
 # ═══════════════════════════════════════════════════════════════
 #  ردود المالك على المستخدمين
 # ═══════════════════════════════════════════════════════════════
@@ -2224,7 +3554,7 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except TelegramError as e:
             await msg.reply_text(f"⚠️ فشل الإرسال: {e}")
             return
-        reply_map[sent.message_id] = (msg.message_id, user_id)
+        remember_reply(sent.message_id, msg.message_id, user_id)
         record_message(user_id, "user", sent.message_id, "owner_reply")
         record_message(user_id, "owner", msg.message_id, "owner_source")
         update_user_stats(user_id, last_reply=time.time())
@@ -2242,6 +3572,30 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 )
             ]]),
         )
+        return
+
+    # ══ جلسة سبب الحظر المفتوحة بكلمة «حظر» العربية (بدون سبب) ══════
+    pending_ban_uid = ctx.user_data.get("ban_reason_target")
+    if (
+        pending_ban_uid
+        and msg.text
+        and not msg.reply_to_message
+        and not msg.text.startswith("/")
+    ):
+        reason = msg.text.strip()
+        ctx.user_data.pop("ban_reason_target", None)
+        if reason:
+            await _send_ban_confirmation_with_reason(
+                ctx, OWNER_ID, int(pending_ban_uid), reason=reason,
+                reply_to=msg.message_id,
+            )
+        else:
+            await msg.reply_text("⚠️ اكتب سبباً واضحاً للحظر، أو أرسل /cancel للإلغاء.")
+        return
+
+    # ══ 🇸🇦 الأوامر العربية: كلمة واحدة بالرد على رسالة العضو = أمر ══
+    # (بتيجي بعد وضع الإرسال الصامت حتى لا تبتلع الرسالة المطلوبة إرسالها)
+    if await handle_arabic_command(update, ctx, msg):
         return
 
     if not msg.reply_to_message:
@@ -2295,7 +3649,7 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except TelegramError as e:
             await msg.reply_text(f"⚠️ فشل الإرسال: {e}")
             return
-        reply_map[sent.message_id] = (msg.message_id, user_id)
+        remember_reply(sent.message_id, msg.message_id, user_id)
         record_message(user_id, "user", sent.message_id, "owner_reply")
         record_message(user_id, "owner", msg.message_id, "owner_source")
         update_user_stats(user_id, last_reply=time.time())
@@ -2315,6 +3669,26 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ══ 🪞 رد المالك بإيموجي فقط → تفاعل فعلي على رسالة العضو ══════
+    # دي الطريقة المضمونة في الشات الخاص لعكس تفاعلاتك على رسالة المستخدم.
+    emoji_only = extract_reaction_emojis(msg.text or "")
+    if emoji_only and load_settings().get("reactions_mirror_enabled", True):
+        if user_msg_id and await _mirror_emoji_reply_to_user(
+            ctx, msg, user_id, user_msg_id, emoji_only
+        ):
+            return
+        if not valid_reaction_emojis(emoji_only):
+            await msg.reply_text(
+                "ℹ️ الإيموجي ده مش من قائمة تفاعلات تيليجرام الرسمية (67 إيموجي) "
+                "فمش هيتحط كتفاعل، وهيتبعت للعضو كرسالة عادية.\n"
+                "أمثلة تشتغل كتفاعل: 👍 ❤ 🔥 🎉 🙏 👏 😁 💯 ⚡",
+            )
+        elif not user_msg_id:
+            await msg.reply_text(
+                "ℹ️ مفيش رسالة أصلية للعضو مرتبطة بالرسالة دي، "
+                "فهيتبعت الإيموجي كرسالة عادية."
+            )
+
     try:
         sent = await ctx.bot.copy_message(
             chat_id=user_id, from_chat_id=OWNER_ID, message_id=msg.message_id,
@@ -2324,7 +3698,7 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except TelegramError as e:
         await msg.reply_text(f"⚠️ فشل الإرسال: {e}")
         return
-    reply_map[sent.message_id] = (msg.message_id, user_id)
+    remember_reply(sent.message_id, msg.message_id, user_id)
     record_message(user_id, "user", sent.message_id, "owner_reply")
     record_message(user_id, "owner", msg.message_id, "owner_source")
     update_user_stats(user_id, last_reply=time.time())
@@ -2752,7 +4126,10 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             info = await _fetch_user_info(ctx, uid)
             name = info.get("full_name") or f"user {uid}"
             is_banned = uid in banned
+            warn_count = get_warn_count(uid)
             label = ("🚫 " if is_banned else "✅ ") + name
+            if warn_count:
+                label = f"⚠️{warn_count} " + label
             style = "danger" if is_banned else "success"
             rows.append([_mk_btn(label[:40], style=style,
                                  callback_data=f"user_details:{uid}")])
@@ -2772,7 +4149,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         await query.message.reply_text(
             f"👥 <b>قائمة المستخدمين ({len(users)}):</b>\n"
-            f"✅ = نشط | 🚫 = محظور",
+            f"✅ = نشط | 🚫 = محظور | ⚠️n = عليه n إنذار",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(rows),
         )
@@ -2819,6 +4196,17 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
              "autoresponder_enabled": False, "auto_replies": [],
              "quick_reply_enabled": False, "quick_reply_msg": DEFAULT_QUICK_REPLY_MSG,
              "protect_content_enabled": False,
+             # ── الإضافات الجديدة ترجع لوضعها الافتراضي ──
+             "reactions_mirror_enabled": True,
+             "receipt_emoji_enabled": True,
+             "receipt_emoji": DEFAULT_RECEIPT_EMOJI,
+             "receipt_emoji_pool": "friendly",
+             "receipt_emoji_big": False,
+             "arabic_commands_enabled": True,
+             "warn_enabled": True,
+             "warn_max": DEFAULT_WARN_MAX,
+             "warn_message": DEFAULT_WARN_MESSAGE,
+             "warn_auto_ban": True,
              # إعادة الإعدادات لا تلغي النسخة العامة أو زر حذفها.
              "global_pin": _global_pin_data(),
              }
@@ -2985,6 +4373,269 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return AWAIT_QUICK_REPLY_TEXT
 
+    # ══ 🪞 عكس التفاعلات ══════════════════════════════════════════
+
+    if data == "toggle_reaction_mirror":
+        s = load_settings()
+        s["reactions_mirror_enabled"] = not s.get("reactions_mirror_enabled", True)
+        save_settings(s)
+        on = s["reactions_mirror_enabled"]
+        await query.answer(f"🪞 عكس التفاعلات {'مفعّل' if on else 'معطّل'}", show_alert=False)
+        kb = InlineKeyboardMarkup([
+            [_mk_btn("🧪 اختبار وصول التفاعلات", style="success", callback_data="receipt_reaction_test")],
+            [_mk_btn("🎯 إيموجي الاستلام", style="primary", callback_data="receipt_emoji_menu")],
+            [_mk_btn("🔙 اللوحة", style="primary", callback_data="back_panel")],
+        ])
+        await _edit_query_text(
+            query,
+            REACTION_MIRROR_HELP.format(status="🟢 مفعّل" if on else "🔴 معطّل"),
+            kb,
+        )
+        return ConversationHandler.END
+
+    if data == "receipt_reaction_test":
+        sent = await ctx.bot.send_message(
+            OWNER_ID,
+            "🧪 <b>رسالة اختبار التفاعلات</b>\n\n"
+            "تفاعل على الرسالة دي بأي إيموجي (اضغط عليها مطولاً ← Add Reaction).\n"
+            "لو وصلني تحديث التفاعل هرد عليك برسالة تأكيد خلال ثواني، "
+            "وده معناه إن المسار الأصلي (🪞) شغال في الشات الخاص عندك.\n\n"
+            "لو مفيش رد خلال دقيقة: استخدم المسار البديل — رد على رسالة "
+            "العضو بإيموجي فقط.",
+            parse_mode=ParseMode.HTML,
+        )
+        s = load_settings()
+        s["reaction_test_message_id"] = sent.message_id
+        save_settings(s)
+        await query.answer("🧪 اتفاعل على رسالة الاختبار دلوقتي", show_alert=False)
+        return ConversationHandler.END
+
+    # ══ 🎯 إيموجي الاستلام التلقائي ══════════════════════════════
+
+    if data == "receipt_emoji_menu":
+        text, kb = receipt_emoji_menu_view()
+        await _edit_query_text(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "receipt_toggle":
+        s = load_settings()
+        s["receipt_emoji_enabled"] = not s.get("receipt_emoji_enabled", True)
+        save_settings(s)
+        await query.answer(
+            f"🎯 إيموجي الاستلام {'مفعّل' if s['receipt_emoji_enabled'] else 'معطّل'}",
+            show_alert=False,
+        )
+        text, kb = receipt_emoji_menu_view()
+        await _edit_query_text(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "receipt_random":
+        s = load_settings()
+        current = str(s.get("receipt_emoji", DEFAULT_RECEIPT_EMOJI)).strip().lower()
+        s["receipt_emoji"] = (
+            DEFAULT_RECEIPT_EMOJI if current == RECEIPT_EMOJI_RANDOM else RECEIPT_EMOJI_RANDOM
+        )
+        save_settings(s)
+        await query.answer(
+            "🎲 وضع عشوائي" if s["receipt_emoji"] == RECEIPT_EMOJI_RANDOM else "🎯 إيموجي ثابت",
+            show_alert=False,
+        )
+        text, kb = receipt_emoji_menu_view()
+        await _edit_query_text(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "receipt_pool":
+        s = load_settings()
+        s["receipt_emoji_pool"] = "friendly" if s.get("receipt_emoji_pool") == "all" else "all"
+        save_settings(s)
+        await query.answer("🎭 تم تغيير مجموعة الإيموجي العشوائي", show_alert=False)
+        text, kb = receipt_emoji_menu_view()
+        await _edit_query_text(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "receipt_big":
+        s = load_settings()
+        s["receipt_emoji_big"] = not s.get("receipt_emoji_big", False)
+        save_settings(s)
+        await query.answer(
+            f"✨ الحركة الكبيرة {'مفعّلة' if s['receipt_emoji_big'] else 'معطّلة'}",
+            show_alert=False,
+        )
+        text, kb = receipt_emoji_menu_view()
+        await _edit_query_text(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "receipt_pick":
+        s = load_settings()
+        await query.edit_message_text(
+            "✏️ <b>أرسل الإيموجي اللي عايزه كتفاعل استلام</b> (إيموجي واحد فقط).\n\n"
+            f"الحالي: <code>{s.get('receipt_emoji', DEFAULT_RECEIPT_EMOJI)}</code>\n"
+            "اكتب <code>random</code> للتحويل للوضع العشوائي.\n\n"
+            f"القائمة الرسمية ({len(RECEIPT_EMOJIS)}):\n" + " ".join(RECEIPT_EMOJIS) +
+            "\n\nأرسل /cancel للإلغاء.",
+            parse_mode=ParseMode.HTML,
+        )
+        return AWAIT_RECEIPT_EMOJI
+
+    if data == "receipt_test":
+        emoji = resolve_receipt_emoji()
+        sent = await ctx.bot.send_message(
+            OWNER_ID,
+            f"🧪 رسالة تجريبية — المفروض يتحط عليها إيموجي الاستلام: {emoji}",
+        )
+        ok = await set_reactions(ctx, OWNER_ID, sent.message_id, [ReactionTypeEmoji(emoji)])
+        await query.answer(
+            f"{'✅ تم وضع ' + emoji if ok else '⚠️ تيليجرام رفض التفاعل'}",
+            show_alert=True,
+        )
+        text, kb = receipt_emoji_menu_view()
+        await _edit_query_text(query, text, kb)
+        return ConversationHandler.END
+
+    # ══ 🇸🇦 الأوامر العربية ══════════════════════════════════════
+
+    if data == "arabic_cmd_menu":
+        text, kb = arabic_cmd_menu_view()
+        await _edit_query_text(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "arabic_cmd_toggle":
+        s = load_settings()
+        s["arabic_commands_enabled"] = not s.get("arabic_commands_enabled", True)
+        save_settings(s)
+        await query.answer(
+            f"🇸🇦 الأوامر العربية {'مفعّلة' if s['arabic_commands_enabled'] else 'معطّلة'}",
+            show_alert=False,
+        )
+        text, kb = arabic_cmd_menu_view()
+        await _edit_query_text(query, text, kb)
+        return ConversationHandler.END
+
+    # ══ ⚠️ نظام الإنذارات ════════════════════════════════════════
+
+    if data == "warn_menu":
+        text, kb = warn_menu_view()
+        await _edit_query_text(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "warn_toggle":
+        s = load_settings()
+        s["warn_enabled"] = not s.get("warn_enabled", True)
+        save_settings(s)
+        await query.answer(
+            f"⚠️ نظام الإنذارات {'مفعّل' if s['warn_enabled'] else 'معطّل'}", show_alert=False
+        )
+        text, kb = warn_menu_view()
+        await _edit_query_text(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "warn_auto_ban_toggle":
+        s = load_settings()
+        s["warn_auto_ban"] = not s.get("warn_auto_ban", True)
+        save_settings(s)
+        await query.answer(
+            "⛔ الحظر التلقائي مفعّل" if s["warn_auto_ban"] else "🔔 الحظر التلقائي معطّل",
+            show_alert=False,
+        )
+        text, kb = warn_menu_view()
+        await _edit_query_text(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "warn_max_edit":
+        _, warn_max, _ = warn_settings()
+        await query.edit_message_text(
+            "🔢 <b>أرسل عدد الإنذارات الكلي</b> (رقم من 1 إلى 20).\n\n"
+            f"الحالي: <code>{warn_max}</code>\n"
+            "عند وصول العضو لهذا العدد يتم حظره تلقائياً حظراً دائم "
+            "(لو الحظر التلقائي مفعّل).\n\nأرسل /cancel للإلغاء.",
+            parse_mode=ParseMode.HTML,
+        )
+        return AWAIT_WARN_MAX
+
+    if data == "warn_text_edit":
+        s = load_settings()
+        await query.edit_message_text(
+            "✏️ <b>أرسل شكل رسالة الإنذار الجديدة</b> (يدعم تنسيق HTML).\n\n"
+            f"الحالية:\n<code>{html.escape(str(s.get('warn_message', DEFAULT_WARN_MESSAGE)))[:1500]}</code>\n\n"
+            "<b>المتغيرات المتاحة:</b>\n"
+            "<code>{user_link}</code> منشن العضو\n"
+            "<code>{name}</code> اسم العضو\n"
+            "<code>{reason}</code> سبب الإنذار\n"
+            "<code>{count}</code> رقم الإنذار الحالي\n"
+            "<code>{max}</code> الحد الأقصى\n"
+            "<code>{remaining}</code> المتبقي قبل الحظر\n"
+            "<code>{progress}</code> شريط مرئي ⚠️⚠️▫️\n"
+            "<code>{footer}</code> التنبيه النهائي\n"
+            "<code>{time}</code> التاريخ والوقت\n\n"
+            "أرسل /cancel للإلغاء.",
+            parse_mode=ParseMode.HTML,
+        )
+        return AWAIT_WARN_TEXT
+
+    if data.startswith("warn_undo:"):
+        uid = int(data.split(":")[1])
+        count = await _apply_unwarn(ctx, uid)
+        _, warn_max, _ = warn_settings()
+        await query.answer(f"↩️ تم إلغاء إنذار ({count}/{warn_max})", show_alert=False)
+        await _refresh_user_card_message(query, ctx, uid)
+        return ConversationHandler.END
+
+    if data.startswith("warn_ack:"):
+        uid = int(data.split(":")[1])
+        update_user_state(uid, warn_ack_at=time.time())
+        count = get_warn_count(uid)
+        _, warn_max, _ = warn_settings()
+        append_audit(uid, "استلام إنذار", f"{count}/{warn_max}")
+        await query.answer("📩 تم تسجيل استلامك للإنذار", show_alert=True)
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=_warn_card_keyboard(uid, count, warn_max, acked=True)
+            )
+        except TelegramError:
+            pass
+        try:
+            info = await _fetch_user_info(ctx, uid)
+            await ctx.bot.send_message(
+                OWNER_ID,
+                f"✅ {_mention_from_info(uid, info)} ضغط «تم الاستلام» على الإنذار "
+                f"({count}/{warn_max}).",
+                parse_mode=ParseMode.HTML,
+            )
+        except TelegramError:
+            pass
+        return ConversationHandler.END
+
+    if data.startswith("warn:"):
+        uid = int(data.split(":")[1])
+        ctx.user_data["warn_reason_target"] = uid
+        await query.edit_message_text(
+            "✍️ اكتب <b>سبب الإنذار</b> الآن في رسالة منفصلة.\n\n"
+            "السبب هيظهر للعضو داخل رسالة الإنذار ويُحفظ في السجل.\n"
+            "أرسل /cancel للإلغاء.",
+            parse_mode=ParseMode.HTML,
+        )
+        return AWAIT_WARN_REASON
+
+    # ══ 📌 تثبيت عام بالكلمة العربية ═════════════════════════════
+
+    if data.startswith("global_pin_yes:"):
+        source_id = int(data.split(":")[1])
+        pinned, failed, total = await _broadcast_and_pin_message(ctx, source_id)
+        await query.answer("📌 تم التثبيت العام", show_alert=False)
+        await _edit_query_text(
+            query,
+            "📌 <b>تمت مزامنة التثبيت لجميع المستخدمين</b>\n\n"
+            f"المستخدمون المستهدفون: {total}\n"
+            f"تم التثبيت عند: {pinned}\n"
+            f"تعذر الإرسال أو التثبيت عند: {failed}",
+            InlineKeyboardMarkup([
+                [_mk_btn("🗑 حذف الرسالة عند المستخدمين", style="danger",
+                         callback_data="global_delete")],
+                [_mk_btn("🔙 اللوحة", style="primary", callback_data="back_panel")],
+            ]),
+        )
+        return ConversationHandler.END
+
     return ConversationHandler.END
 
 # ═══════════════════════════════════════════════════════════════
@@ -3134,8 +4785,123 @@ async def recv_quick_reply_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ تم تحديث نص الرد السريع.", reply_markup=owner_panel_keyboard())
     return ConversationHandler.END
 
+
+async def recv_receipt_emoji(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """🎯 استلام الإيموجي الثابت الجديد من المالك مع التحقق من صلاحيته كتفاعل."""
+    if update.effective_user.id != OWNER_ID:
+        return ConversationHandler.END
+    text = (update.message.text or "").strip()
+    normalized = normalize_receipt_emoji(text)
+    if not normalized:
+        await update.message.reply_text(
+            "⚠️ ده مش إيموجي صالح كتفاعل في تيليجرام.\n"
+            "ابعت إيموجي واحد من القائمة الرسمية دي، أو اكتب <code>random</code> "
+            "للتحويل للوضع العشوائي:\n\n" + " ".join(RECEIPT_EMOJIS),
+            parse_mode=ParseMode.HTML,
+        )
+        return AWAIT_RECEIPT_EMOJI
+    s = load_settings(); s["receipt_emoji"] = normalized; save_settings(s)
+    view = "🎲 عشوائي" if normalized == RECEIPT_EMOJI_RANDOM else normalized
+    menu_text, kb = receipt_emoji_menu_view()
+    await update.message.reply_text(
+        f"✅ تم ضبط إيموجي الاستلام على: {view}\n\n" + menu_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb,
+    )
+    return ConversationHandler.END
+
+
+async def recv_warn_reason(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """⚠️ سبب الإنذار المكتوب بعد الضغط على زر «إنذار» في بطاقة المستخدم."""
+    if update.effective_user.id != OWNER_ID:
+        return ConversationHandler.END
+    uid = ctx.user_data.pop("warn_reason_target", None)
+    reason = (update.message.text or "").strip()
+    if not uid:
+        await update.message.reply_text("⚠️ انتهت جلسة الإنذار. أعد الضغط على زر الإنذار.")
+        return ConversationHandler.END
+    if not reason:
+        ctx.user_data["warn_reason_target"] = uid
+        await update.message.reply_text("⚠️ اكتب سبباً واضحاً للإنذار أو أرسل /cancel.")
+        return AWAIT_WARN_REASON
+    await _apply_warn(ctx, int(uid), reason=reason,
+                      source_message_id=update.message.message_id)
+    return ConversationHandler.END
+
+
+async def recv_warn_max(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """🔢 ضبط عدد الإنذارات الكلي."""
+    if update.effective_user.id != OWNER_ID:
+        return ConversationHandler.END
+    text = (update.message.text or "").strip()
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if not 1 <= value <= 20:
+        await update.message.reply_text(
+            "⚠️ اكتب رقماً صحيحاً من 1 إلى 20.\n"
+            "مثال: <code>2</code> — أو أرسل /cancel للإلغاء.",
+            parse_mode=ParseMode.HTML,
+        )
+        return AWAIT_WARN_MAX
+    s = load_settings(); s["warn_max"] = value; save_settings(s)
+    for uid in load_users():
+        if get_warn_count(uid) > value:
+            update_user_state(uid, warn_count=value)
+    menu_text, kb = warn_menu_view()
+    await update.message.reply_text(
+        f"✅ تم ضبط عدد الإنذارات الكلي على {value}.\n\n" + menu_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb,
+    )
+    return ConversationHandler.END
+
+
+async def recv_warn_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """✏️ حفظ شكل رسالة الإنذار بعد معاينتها والتأكد من صحة التنسيق."""
+    if update.effective_user.id != OWNER_ID:
+        return ConversationHandler.END
+    new_text = update.message.text or ""
+    if not new_text.strip():
+        await update.message.reply_text("⚠️ أرسل نص رسالة الإنذار، أو /cancel للإلغاء.")
+        return AWAIT_WARN_TEXT
+    _, warn_max, _ = warn_settings()
+    preview = render_premium_emojis(_render_template(new_text, {
+        "user_link": "<b>اسم العضو</b>",
+        "name": "اسم العضو",
+        "reason": "مثال على سبب الإنذار",
+        "count": 1,
+        "max": warn_max,
+        "remaining": max(0, warn_max - 1),
+        "progress": warn_progress_text(1, warn_max),
+        "footer": DEFAULT_WARN_FOOTER,
+        "time": display_time(time.time()),
+    }))
+    try:
+        await ctx.bot.send_message(
+            OWNER_ID, "👁️ <b>معاينة شكل رسالة الإنذار:</b>\n\n" + preview,
+            parse_mode=ParseMode.HTML,
+        )
+    except TelegramError as e:
+        await update.message.reply_text(
+            f"⚠️ التنسيق غير صالح ولم يتم الحفظ:\n<code>{html.escape(str(e))}</code>\n\n"
+            "تأكد من إغلاق الوسوم مثل <b> و<i> بشكل صحيح، أو أرسل /cancel.",
+            parse_mode=ParseMode.HTML,
+        )
+        return AWAIT_WARN_TEXT
+    s = load_settings(); s["warn_message"] = new_text; save_settings(s)
+    menu_text, kb = warn_menu_view()
+    await update.message.reply_text(
+        "✅ تم حفظ شكل رسالة الإنذار (المعاينة فوق).\n\n" + menu_text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb,
+    )
+    return ConversationHandler.END
+
 async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data.pop("ban_reason_target", None)
+    ctx.user_data.pop("warn_reason_target", None)
     ctx.user_data.pop("pending_bans", None)
     await update.message.reply_text("❌ تم الإلغاء.", reply_markup=owner_panel_keyboard())
     return ConversationHandler.END
@@ -3304,7 +5070,7 @@ async def cmd_forward(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(f"⚠️ فشل تحويل الرسالة: {e}")
         return
 
-    reply_map[sent.message_id] = (msg.message_id, target)
+    remember_reply(sent.message_id, msg.message_id, target)
     await msg.reply_text(
         f"✅ تم تحويل الرسالة إلى المستخدم <code>{target}</code> بنجاح (بدون كشف هوية صاحبها الأصلي).",
         parse_mode=ParseMode.HTML,
@@ -3853,6 +5619,13 @@ async def handle_owner_pinned_message(update: Update, ctx: ContextTypes.DEFAULT_
     pinned = getattr(msg, "pinned_message", None)
     if not pinned or not pinned.message_id:
         return
+    # تثبيت نفّذه البوت نفسه (زر 📌 تثبيت عندي / كلمة «تثبيت») → محلي فقط،
+    # لا يُبث لجميع المستخدمين.
+    if int(pinned.message_id) in _local_pin_ids:
+        pin_uid = find_user_by_owner_message(int(pinned.message_id))
+        if pin_uid:
+            record_message(pin_uid, "owner", msg.message_id, "pin_service")
+        return
     try:
         pinned_count, failed, total = await _broadcast_and_pin_message(
             ctx, int(pinned.message_id)
@@ -3882,44 +5655,81 @@ async def handle_owner_pinned_message(update: Update, ctx: ContextTypes.DEFAULT_
 # ═══════════════════════════════════════════════════════════════
 
 async def handle_reaction(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    r = update.message_reaction
-    if not r: return
-    actor_id = r.user.id if r.user else None
-    msg_id   = r.message_id
-    chat_id  = r.chat.id
+    """
+    🪞 المسار الأصلي لعكس التفاعلات عبر تحديث message_reaction.
 
-    # المالك → forward في شاته → يُعكَس على رسالة المستخدم
-    if actor_id == OWNER_ID and chat_id == OWNER_ID and msg_id in msg_map:
-        user_id, user_msg_id = msg_map[msg_id]
-        if not user_msg_id: return
-        new_r = r.new_reaction
-        emoji = getattr(new_r[0], "emoji", "⚡") if new_r else "⚡"
+    التصحيحات عن النسخة القديمة:
+      • إزالة التفاعل بقت تُمسح فعلاً عند الطرف التاني (كان بيحط ⚡ دائماً).
+      • دعم الإيموجي البريميوم (custom_emoji) بجانب الإيموجي العادي.
+      • تجاهل التفاعلات المجهولة (actor_chat) وتفاعلات البوت نفسه.
+      • احترام مفتاح «عكس التفاعلات» من لوحة التحكم.
+
+    ملاحظة: تيليجرام يسلّم هذه التحديثات أساساً في المجموعات/القنوات التي
+    يكون البوت أدمن فيها، وقد لا تصل في المحادثات الخاصة. لذلك يوجد مسار
+    بديل مضمون في الشات الخاص: الرد على الرسالة بإيموجي فقط.
+    """
+    r = update.message_reaction
+    if not r:
+        return
+    actor_id = r.user.id if r.user else None
+    if not actor_id:
+        return                      # تفاعل مجهول (قناة) — لا يمكن عكسه لطرف محدد
+    try:
+        msg_id = int(r.message_id)
+        chat_id = int(r.chat.id)
+    except (TypeError, ValueError):
+        return
+    types = _reaction_types_from(r.new_reaction)
+
+    # 🧪 رسالة اختبار التفاعلات (من لوحة التحكم) → تأكيد وصول التحديث للمالك
+    settings = load_settings()
+    test_id = settings.get("reaction_test_message_id")
+    if test_id and chat_id == int(OWNER_ID) and msg_id == int(test_id):
+        settings["reaction_test_message_id"] = None
+        save_settings(settings)
+        emoji_view = " ".join(
+            getattr(t, "emoji", None) or "✨ بريميوم" for t in types
+        ) or "(تم مسح التفاعل)"
         try:
-            await ctx.bot.set_message_reaction(
-                chat_id=user_id, message_id=user_msg_id,
-                reaction=[ReactionTypeEmoji(emoji)],
+            await ctx.bot.send_message(
+                OWNER_ID,
+                "✅ <b>وصلني تحديث تفاعلك!</b>\n\n"
+                f"التفاعل: {emoji_view}\n"
+                "يعني المسار الأصلي لعكس التفاعلات 🪞 شغال في الشات الخاص "
+                "عندك: أي تفاعل تحطه على رسالة عضو محوّلة هينعكس تلقائياً "
+                "على رسالته الأصلية.",
+                parse_mode=ParseMode.HTML,
+                reply_parameters=make_rp(msg_id),
             )
-        except TelegramError as e: logger.error(f"reaction owner→user: {e}")
+        except TelegramError:
+            pass
         return
 
-    # المستخدم → رد المالك → يُعكَس على شات المالك
-    if actor_id and actor_id != OWNER_ID and msg_id in reply_map:
-        owner_reply_id, uid = reply_map[msg_id]
-        if uid != actor_id: return
-        new_r = r.new_reaction
-        try:
-            if new_r:
-                emoji = getattr(new_r[0], "emoji", None)
-                if emoji:
-                    await ctx.bot.set_message_reaction(
-                        chat_id=OWNER_ID, message_id=owner_reply_id,
-                        reaction=[ReactionTypeEmoji(emoji)],
-                    )
-            else:
-                await ctx.bot.set_message_reaction(
-                    chat_id=OWNER_ID, message_id=owner_reply_id, reaction=[],
-                )
-        except TelegramError as e: logger.error(f"reaction user→owner: {e}")
+    if not load_settings().get("reactions_mirror_enabled", True):
+        return
+
+    # المالك تفاعل على رسالة محوّلة في شاته → تُعكس على رسالة العضو الأصلية
+    if int(actor_id) == int(OWNER_ID) and chat_id == int(OWNER_ID):
+        mapped = msg_map.get(msg_id)
+        if not mapped:
+            return
+        user_id, user_msg_id = mapped
+        if not user_msg_id:
+            return
+        if await set_reactions(ctx, int(user_id), int(user_msg_id), types):
+            logger.info(f"🪞 عكس تفاعل المالك على رسالة العضو {user_id}")
+        return
+
+    # العضو تفاعل على رد المالك عنده → تُعكس على رسالة المالك الأصلية
+    if int(actor_id) != int(OWNER_ID) and chat_id == int(actor_id):
+        entry = reply_map.get(msg_id)
+        if not entry:
+            return
+        owner_reply_id, uid = entry
+        if int(uid) != int(actor_id):
+            return
+        if await set_reactions(ctx, OWNER_ID, int(owner_reply_id), types):
+            logger.info(f"🪞 عكس تفاعل العضو {actor_id} على رد المالك")
 
 # ═══════════════════════════════════════════════════════════════
 #  إشعارات المجموعات
@@ -4087,6 +5897,10 @@ def build_app():
             AWAIT_AI_KEY:           [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_ai_key)],
             AWAIT_AI_MODEL:         [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_ai_model)],
             AWAIT_BAN_REASON:       [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_ban_reason)],
+            AWAIT_RECEIPT_EMOJI:    [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_receipt_emoji)],
+            AWAIT_WARN_REASON:      [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_warn_reason)],
+            AWAIT_WARN_MAX:         [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_warn_max)],
+            AWAIT_WARN_TEXT:        [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_warn_text)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_chat=True, per_user=True, per_message=False,
