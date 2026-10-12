@@ -2392,7 +2392,8 @@ def arabic_cmd_menu_view():
         + ARABIC_COMMAND_HELP
         + "\n\n⚠️ لو عايز تبعت الكلمة نفسها كرسالة عادية للعضو ابدأ رسالتك "
         "بعلامة <code>&</code> — مثال: <code>&حظر</code>.\n"
-        "💡 الكتابة متسامحة مع التشكيل والهمزات (إنذار = انذار، تأجيل = تاجيل)."
+        "💡 الكتابة متسامحة مع التشكيل والهمزات (إنذار = انذار، تأجيل = تاجيل).\n\n"
+        "🔤 <b>أوامر إنجليزية موازية (نفس المنطق):</b>\n" + PARALLEL_COMMAND_HELP
     )
     kb = InlineKeyboardMarkup([
         [_mk_btn("🔴 تعطيل الأوامر العربية" if enabled else "🟢 تفعيل الأوامر العربية",
@@ -3225,6 +3226,15 @@ async def handle_arabic_command(update, ctx, msg) -> bool:
             await cancel(update, ctx)
         return True
 
+    return await execute_user_action(action, update, ctx, msg, args)
+
+
+async def execute_user_action(action: str, update, ctx, msg, args: str) -> bool:
+    """
+    ينفّذ أمراً موجّهاً لعضو محدد — نفس المسار تماماً للكلمات العربية
+    (حظر/إنذار/تثبيت/تأجيل...) ولأوامر الشرطة المائلة الموازية
+    (/warn, /unwarn, /mute, /unmute, /snooze, /pin, /unpin).
+    """
     # ── أوامر لا تحتاج عضواً محدداً ───────────────────────────────
     if action == "global_pin":
         replied = msg.reply_to_message
@@ -3453,6 +3463,37 @@ async def handle_arabic_command(update, ctx, msg) -> bool:
         return True
 
     return False
+
+
+# ═══════════════════════════════════════════════════════════════
+#  أوامر شرطة مائلة موازية للكلمات العربية (المالك فقط)
+#  /warn /unwarn /mute /unmute /snooze /pin /unpin
+#  (ban / unban / info / clear / forward موجودة بالفعل بأوامرها الإنجليزية)
+# ═══════════════════════════════════════════════════════════════
+
+PARALLEL_COMMANDS = ("warn", "unwarn", "mute", "unmute", "snooze", "pin", "unpin")
+
+PARALLEL_COMMAND_HELP = (
+    "<code>/warn السبب</code> — إنذار\n"
+    "<code>/unwarn</code> — إنقاص إنذار\n"
+    "<code>/mute 6 ساعات</code> — كتم (افتراضياً 24 ساعة)\n"
+    "<code>/unmute</code> — فك الكتم\n"
+    "<code>/snooze يومين</code> — تأجيل (بدون مدة تظهر أزرار المدد)\n"
+    "<code>/pin</code> — تثبيت الرسالة في شاتك فقط\n"
+    "<code>/unpin</code> — إلغاء التثبيت"
+)
+
+
+def _make_parallel_command(action: str):
+    """يبني handler لأمر /xxx ينفّذ نفس منطق الكلمة العربية المكافئة تماماً."""
+    async def _handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        msg = update.effective_message
+        if not msg or not update.effective_user or update.effective_user.id != OWNER_ID:
+            return
+        args = " ".join(ctx.args or []).strip()
+        await execute_user_action(action, update, ctx, msg, args)
+    _handler.__name__ = f"cmd_{action}"
+    return _handler
 
 
 async def _forward_owner_message(ctx, msg, args: str):
@@ -5915,6 +5956,9 @@ def build_app():
     app.add_handler(CommandHandler("emoji_id",  cmd_emoji_id))
     app.add_handler(CommandHandler("backup",    cmd_backup))
     app.add_handler(CommandHandler("restore",   cmd_restore))
+    # أوامر إنجليزية موازية للكلمات العربية (نفس المنطق تماماً)
+    for _action in PARALLEL_COMMANDS:
+        app.add_handler(CommandHandler(_action, _make_parallel_command(_action)))
     # حالة: المالك يبعت ملف الـ JSON مع كتابة /restore في الكابشن (نفس الرسالة)
     app.add_handler(MessageHandler(
         filters.Document.ALL & filters.CaptionRegex(r"^/restore") & filters.User(OWNER_ID),
