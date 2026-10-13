@@ -19,10 +19,11 @@ from pathlib import Path
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     LinkPreviewOptions, ReactionTypeEmoji, ReactionTypeCustomEmoji,
-    ReplyParameters, MessageEntity,
+    ReplyParameters, MessageEntity, BotCommand, MenuButtonCommands, MenuButtonDefault,
+    BotCommandScopeChat,
 )
 from telegram.constants import ParseMode
-from telegram.error import TelegramError
+from telegram.error import TelegramError, BadRequest
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ConversationHandler, MessageReactionHandler, ChatMemberHandler,
@@ -212,6 +213,10 @@ def load_settings():
     d.setdefault("warn_max", DEFAULT_WARN_MAX)          # عدد الإنذارات الكلي
     d.setdefault("warn_message", DEFAULT_WARN_MESSAGE)  # قالب رسالة الإنذار للعضو
     d.setdefault("warn_auto_ban", True)                 # حظر دائم تلقائي عند استيفاء العدد
+    # ── 📝 رسالة البدء المحسّنة + ⌨️ زر /start الجانبي ──
+    d.setdefault("welcome_media", dict(DEFAULT_WELCOME_MEDIA))    # ملصق/صورة/فيديو/GIF + كابشن
+    d.setdefault("welcome_preview", dict(DEFAULT_WELCOME_PREVIEW))  # تخصيص معاينة الروابط
+    d.setdefault("menu_button_enabled", True)           # زر /start الثابت في واجهة المستخدم
     d.setdefault("global_pin", {
         "source_message_id": None,
         "targets": {},
@@ -675,6 +680,15 @@ AWAIT_RECEIPT_EMOJI    = 11
 AWAIT_WARN_REASON      = 12
 AWAIT_WARN_MAX         = 13
 AWAIT_WARN_TEXT        = 14
+# ⌨️ محرر الكيبورد المتقدّم
+AWAIT_BUTTON_TEXT      = 15
+AWAIT_BUTTON_URL       = 16
+AWAIT_BUTTON_EMOJI     = 17
+AWAIT_NEW_BUTTON       = 18
+# 📝 رسالة البدء المحسّنة (ميديا + معاينة روابط)
+AWAIT_WELCOME_MEDIA    = 19
+AWAIT_WELCOME_CAPTION  = 20
+AWAIT_PREVIEW_URL      = 21
 # ═══════════════════════════════════════════════════════════════
 #  خرائط الرسائل (ذاكرة)
 #  msg_map        : owner_fwd_id → (user_id, user_msg_id | None)
@@ -778,6 +792,15 @@ async def apply_receipt_emoji(ctx, chat_id: int, message_id: int) -> str | None:
 #  مساعدات عامة
 # ═══════════════════════════════════════════════════════════════
 
+def user_name(user) -> str:
+    """اسم المستخدم للعرض (الاسم الكامل أو اليوزرنيم أو 'مستخدم')."""
+    if user is None:
+        return "مستخدم"
+    name = getattr(user, "full_name", None) or getattr(user, "first_name", None) \
+        or getattr(user, "username", None)
+    return html.escape(str(name)) if name else "مستخدم"
+
+
 def user_mention(user):
     name = user.full_name or "مجهول"
     if user.username:
@@ -795,7 +818,14 @@ def chat_mention(chat):
         return f'<a href="https://t.me/{chat.username}">{name}</a>'
     return f'<a href="tg://user?id={chat.id}">{name}</a>'
 
-VALID_BUTTON_STYLES = {"primary", "success", "danger"}
+VALID_BUTTON_STYLES = {"default", "primary", "success", "danger"}
+
+BUTTON_STYLE_LABELS = {
+    "default": "⚪ افتراضي",
+    "danger": "🔴 خطر",
+    "success": "🟢 نجاح",
+    "primary": "🔵 أساسي",
+}
 
 
 def _button_text_and_api_kwargs(text: str, style: str | None = None):
@@ -813,7 +843,8 @@ def _button_text_and_api_kwargs(text: str, style: str | None = None):
     النص الاحتياطي (🔥) اللي اتحط مكان {ID} من غير ما يتحول لإيموجي بريميوم.
     """
     api_kwargs: dict = {}
-    if style and style in VALID_BUTTON_STYLES:
+    # "default" = بدون ستايل إضافي (الشكل الأصلي للزر في تيليجرام)
+    if style and style in VALID_BUTTON_STYLES and style != "default":
         api_kwargs["style"] = style
 
     matches = list(PREMIUM_EMOJI_RE.finditer(text))
@@ -839,19 +870,83 @@ def _mk_btn(text: str, style: str | None = None, **kwargs) -> InlineKeyboardButt
     return InlineKeyboardButton(new_text, **kwargs)
 
 
-def welcome_keyboard(buttons):
+def _clean_button(b) -> dict:
+    """يوحّد شكل بيانات الزر ويضمن صحة القيم (نص ≤64، ستايل معروف)."""
+    b = b or {}
+    text = str(b.get("text") or "").strip()[:64] or "زر"
+    url = str(b.get("url") or "").strip()
+    style = str(b.get("style") or "success").strip().lower()
+    if style not in VALID_BUTTON_STYLES:
+        style = "success"
+    out = {"text": text, "url": url, "style": style}
+    emoji_id = str(b.get("emoji_id") or "").strip()
+    if emoji_id:
+        out["emoji_id"] = emoji_id
+    return out
+
+
+def normalize_button_rows(buttons) -> list[list[dict]]:
+    """
+    يقبل الشكلين ويرجّع صفوف أزرار:
+      • الجديد: [[{...}, {...}], [{...}]]  ← صفوف كاملة
+      • القديم: [{...}, {...}, {...}]      ← قائمة مسطّحة (زرّين في الصف)
+    فالترحيل من البيانات المحفوظة قديماً يتم تلقائياً بدون فقدان أي زر.
+    """
+    if not buttons:
+        return []
+    if all(isinstance(b, dict) for b in buttons):
+        rows: list[list[dict]] = []
+        row: list[dict] = []
+        for b in buttons:                     # ترحيل تلقائي للشكل القديم
+            row.append(_clean_button(b))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        return rows
+
+    rows = []
+    for item in buttons:
+        if isinstance(item, dict):
+            rows.append([_clean_button(item)])
+            continue
+        clean = [_clean_button(b) for b in (item or []) if isinstance(b, dict)]
+        if clean:
+            rows.append(clean[:8])            # تيليجرام: حتى 8 أزرار في الصف
+    return rows
+
+
+def button_rows() -> list[list[dict]]:
+    """صفوف أزرار رسالة البدء الحالية من الإعدادات."""
+    return normalize_button_rows(load_settings().get("buttons") or DEFAULT_BUTTONS)
+
+
+def save_button_rows(rows: list[list[dict]]):
+    """يحفظ صفوف الأزرار (الشكل الجديد) في الإعدادات."""
+    s = load_settings()
+    s["buttons"] = [[_clean_button(b) for b in row] for row in rows if row]
+    save_settings(s)
+    return s["buttons"]
+
+
+def welcome_keyboard(buttons=None):
+    """
+    يبني كيبورد رسالة البدء من صفوف الأزرار.
+    الأزرار بدون رابط تُتجاهل عند العرض (تيليجرام يطلب رابط أو إجراء لكل زر).
+    """
+    if buttons is None:
+        buttons = load_settings().get("buttons") or DEFAULT_BUTTONS
     keyboard = []
-    row = []
-    for b in buttons:
-        style = b.get("style", "success")
-        if style not in VALID_BUTTON_STYLES:
-            style = "success"
-        row.append(_mk_btn(b["text"], style=style, url=b["url"]))
-        if len(row) == 2:          # زرين جنب بعض في نفس الصف
-            keyboard.append(row)
-            row = []
-    if row:                        # لو فضل زر لوحده (عدد فردي)
-        keyboard.append(row)
+    for row in normalize_button_rows(buttons):
+        line = [
+            _mk_btn(b["text"], style=b["style"], url=b["url"])
+            for b in row if b.get("url")
+        ]
+        if line:
+            keyboard.append(line[:8])
+    if not keyboard:
+        keyboard = [[_mk_btn("خاص المدير", style="success", url="https://t.me/hamo_alfiqi")]]
     return InlineKeyboardMarkup(keyboard)
 
 def owner_panel_keyboard():
@@ -874,7 +969,7 @@ def owner_panel_keyboard():
     receipt_style = "success" if receipt_on else "danger"
     receipt_value = str(s.get("receipt_emoji", DEFAULT_RECEIPT_EMOJI))
     receipt_emoji_view = "🎲 عشوائي" if receipt_value.lower() == RECEIPT_EMOJI_RANDOM else receipt_value
-    receipt_label = f"{receipt_emoji_view} · {'مفعّل' if receipt_on else 'معطّل'}"
+    receipt_label = f"{'🟢 شغّال' if receipt_on else '🔴 مطفي'}"
     arabic_on = bool(s.get("arabic_commands_enabled", True))
     arabic_style = "success" if arabic_on else "danger"
     arabic_label = "مفعّلة" if arabic_on else "معطّلة"
@@ -914,12 +1009,27 @@ def owner_panel_keyboard():
         [_mk_btn(f"🤖 الرد بالذكاء الاصطناعي — {ai_label[2:]}", style=ai_style, callback_data="ai_reply_menu")],
         [_mk_btn(f"🪞 عكس التفاعلات — {mirror_label}", style=mirror_style,
                  callback_data="toggle_reaction_mirror")],
-        [_mk_btn(f"🎯 إيموجي الاستلام — {receipt_label}", style=receipt_style,
-                 callback_data="receipt_emoji_menu")],
+        # 🎯 إيموجي الاستلام: تشغيل/تعطيل بضغطة واحدة + ⚙️ إعداداته في زر تاني
+        [
+            _mk_btn(f"🎯 الاستلام عند الوصول — {receipt_label}",
+                    style=receipt_style, callback_data="receipt_toggle_direct"),
+            _mk_btn(f"⚙️ إعدادات الاستلام {receipt_emoji_view}", style="primary",
+                    callback_data="receipt_emoji_menu"),
+        ],
         [_mk_btn(f"🇸🇦 الأوامر العربية — {arabic_label}", style=arabic_style,
                  callback_data="arabic_cmd_menu")],
         [_mk_btn(f"⚠️ نظام الإنذارات — {warn_label}", style=warn_style,
                  callback_data="warn_menu")],
+        # 📝 رسالة البدء المحسّنة + ⌨️ محرر الكيبورد + زر البدء الجانبي
+        [
+            _mk_btn("📝 رسالة البدء (ميديا/معاينة)", style="primary",
+                    callback_data="start_msg_menu"),
+            _mk_btn("⌨️ محرر الكيبورد", style="primary", callback_data="kb_editor"),
+        ],
+        [_mk_btn(f"⌨️ زر «بدء محادثة» الجانبي — "
+                 f"{'🟢 مفعّل' if s.get('menu_button_enabled', True) else '🔴 معطّل'}",
+                 style="success" if s.get("menu_button_enabled", True) else "danger",
+                 callback_data="menu_button_menu")],
         [_mk_btn(protect_label, style=protect_style, callback_data="toggle_protect_content")],
         [_mk_btn("🔄 إعادة الإعدادات للأصل", style="danger", callback_data="reset_settings")],
     ]
@@ -1530,13 +1640,16 @@ async def _apply_warn(ctx, uid: int, reason: str = "", source_message_id: int | 
 
     sent = None
     try:
-        sent = await ctx.bot.send_message(
-            uid,
-            user_text,
-            parse_mode=ParseMode.HTML,
+        # 🔄 المحرك: أي تنسيق في قالب الإنذار يشتغل، والرسالة الطويلة تتقسم،
+        # ولو تيليجرام رفض التنسيق تتبعت كنص عادي (ما تضيعش).
+        warn_messages = await send_formatted(
+            ctx.bot, uid, user_text,
             reply_markup=_warn_card_keyboard(uid, count, warn_max),
             **protect_kwargs(uid),
         )
+        sent = warn_messages[-1] if warn_messages else None
+        if sent is None:
+            raise TelegramError("لم تُرسل رسالة الإنذار")
         record_message(uid, "user", sent.message_id, "warn_notice")
     except TelegramError as e:
         logger.error(f"تعذر إرسال الإنذار للمستخدم {uid}: {e}")
@@ -2078,6 +2191,608 @@ def render_premium_emojis(text: str) -> str:
     )
 
 # ═══════════════════════════════════════════════════════════════
+#  🔄 محرك تنسيق النصوص — اكتب بحرية والبوت يفهمك
+#
+#  1) تنسيق تيليجرام الأصلي (entities) → يتحوّل HTML ويُحفظ كما هو
+#  2) Markdown: **عريض** __تحته خط__ ~شطب~ ||مخفي|| `كود` [رابط](url)
+#  3) HTML كامل: كل الوسوم المدعومة مع الروابط والاقتباسات
+#  + إيموجي بريميوم {ID} تلقائياً (وبديل لغير المشتركين)
+#  + تقسيم الرسائل الطويلة (>4096) مع الحفاظ على التنسيق في كل جزء
+#  + حماية من الأخطاء: إغلاق الوسوم المفتوحة، ورفض تيليجرام = إرسال نص عادي
+# ═══════════════════════════════════════════════════════════════
+
+TG_TEXT_LIMIT = 4096
+TG_CAPTION_LIMIT = 1024
+
+TG_HTML_TAGS = {
+    "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+    "tg-spoiler", "code", "pre", "blockquote", "a", "tg-emoji",
+}
+TG_TAG_ALIASES = {
+    "strong": "b", "em": "i", "ins": "u", "strike": "s", "del": "s",
+}
+HTML_TAG_RE = re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)((?:\s+[^<>]*?)?)(/?)>")
+HTML_TAG_DETECT_RE = re.compile(
+    r"</?(?:b|strong|i|em|u|ins|s|strike|del|tg-spoiler|code|pre|blockquote|a|span|tg-emoji)"
+    r"(?:\s[^<>]*)?>",
+    re.IGNORECASE,
+)
+MD_HINT_PATTERNS = (
+    re.compile(r"```"),
+    re.compile(r"\*\*.+?\*\*", re.S),
+    re.compile(r"__.+?__", re.S),
+    re.compile(r"\|\|.+?\|\|", re.S),
+    re.compile(r"~~.+?~~", re.S),
+    re.compile(r"(?<!~)~[^~\n]+~(?!~)"),
+    re.compile(r"`[^`\n]+`"),
+    re.compile(r"(?<![\*\w])\*[^\*\n]+\*(?![\*\w])"),
+    re.compile(r"(?<![_\w])_[^_\n]+_(?![_\w])"),
+    re.compile(r"\[[^\]\n]+\]\((?:https?://|tg://)[^\s)]+\)"),
+)
+MD_PRE_RE = re.compile(r"```(?:(\w+)[ \t]*\n)?(.*?)```", re.S)
+MD_CODE_RE = re.compile(r"`([^`\n]+)`")
+MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.S)
+MD_UNDERLINE_RE = re.compile(r"__(.+?)__", re.S)
+MD_SPOILER_RE = re.compile(r"\|\|(.+?)\|\|", re.S)
+MD_STRIKE_RE = re.compile(r"~~(.+?)~~", re.S)
+MD_STRIKE_ONE_RE = re.compile(r"(?<!~)~([^~\n]+)~(?!~)")
+MD_ITALIC_RE = re.compile(r"(?<![\*\w])\*([^\*\n]+)\*(?![\*\w])|(?<![_\w])_([^_\n]+)_(?![_\w])")
+MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(((?:https?://|tg://)[^\s)]+)\)")
+HREF_RE = re.compile(r"""href\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))""", re.IGNORECASE)
+
+ENTITY_HTML_TAGS = {
+    "bold": ("b", None),
+    "italic": ("i", None),
+    "underline": ("u", None),
+    "strikethrough": ("s", None),
+    "spoiler": ("tg-spoiler", None),
+    "code": ("code", None),
+    "pre": ("pre", None),
+    "blockquote": ("blockquote", None),
+    "expandable_blockquote": ("blockquote", None),
+    "text_link": ("a", "url"),
+    "text_mention": ("a", "user"),
+    "custom_emoji": ("tg-emoji", "custom_emoji_id"),
+}
+
+
+def _escape_text_segment(segment: str) -> str:
+    """يهرب < و > مع الحفاظ على الكيانات الصحيحة الموجودة زي &amp;."""
+    if not segment:
+        return ""
+    out = segment.replace("<", "&lt;").replace(">", "&gt;")
+    return re.sub(r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)", "&amp;", out)
+
+
+def strip_html_tags(text: str) -> str:
+    """يشيل الوسوم ويرجع نصاً عادياً (يُستخدم عند رفض تيليجرام للتنسيق)."""
+    plain = re.sub(r"<[^<>]*>", "", text or "")
+    return html.unescape(plain)
+
+
+def detect_text_format(text: str) -> str:
+    """html | markdown | plain — كشف تلقائي بدون أي إعدادات."""
+    if not text:
+        return "plain"
+    if HTML_TAG_DETECT_RE.search(text):
+        return "html"
+    for pattern in MD_HINT_PATTERNS:
+        if pattern.search(text):
+            return "markdown"
+    return "plain"
+
+
+def markdown_to_html(text: str) -> str:
+    """يحوّل Markdown إلى Telegram HTML مع حماية محتوى الكود من التحويل."""
+    if not text:
+        return ""
+    stash: dict[str, str] = {}
+
+    def keep(rendered: str) -> str:
+        token = f"\x00{len(stash)}\x00"
+        stash[token] = rendered
+        return token
+
+    work = MD_PRE_RE.sub(
+        lambda m: keep(
+            "<pre>"
+            + (
+                f'<code class="language-{m.group(1)}">{html.escape(m.group(2).strip(chr(10)))}</code>'
+                if m.group(1)
+                else f"<code>{html.escape(m.group(2).strip(chr(10)))}</code>"
+            )
+            + "</pre>"
+        ),
+        text,
+    )
+    work = MD_CODE_RE.sub(lambda m: keep(f"<code>{html.escape(m.group(1))}</code>"), work)
+    work = html.escape(work)
+    work = MD_LINK_RE.sub(
+        lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', work
+    )
+    work = MD_BOLD_RE.sub(r"<b>\1</b>", work)
+    work = MD_UNDERLINE_RE.sub(r"<u>\1</u>", work)
+    work = MD_SPOILER_RE.sub(r"<tg-spoiler>\1</tg-spoiler>", work)
+    work = MD_STRIKE_RE.sub(r"<s>\1</s>", work)
+    work = MD_STRIKE_ONE_RE.sub(r"<s>\1</s>", work)
+    work = MD_ITALIC_RE.sub(
+        lambda m: f"<i>{m.group(1) or m.group(2)}</i>", work
+    )
+    for token, rendered in stash.items():
+        work = work.replace(token, rendered)
+    return work
+
+
+def sanitize_telegram_html(text: str) -> str:
+    """
+    ينظّف HTML: يبقي وسوم تيليجرام المدعومة فقط، يهرب الباقي كنص،
+    يرتّب الإغلاق الصحيح للتداخل، ويغلق أي وسم مفتوح في النهاية تلقائياً.
+    """
+    if not text:
+        return ""
+    out: list[str] = []
+    stack: list[str] = []
+    cursor = 0
+    for match in HTML_TAG_RE.finditer(text):
+        out.append(_escape_text_segment(text[cursor:match.start()]))
+        cursor = match.end()
+        closing, tag, attrs, self_close = match.groups()
+        tag = (tag or "").lower()
+        attrs = attrs or ""
+
+        if tag == "span":
+            # <span class="tg-spoiler"> صيغة قديمة → نحوّلها للوسم الصحيح
+            if closing:
+                tag = "tg-spoiler" if (stack and stack[-1] == "tg-spoiler") else None
+            else:
+                tag = "tg-spoiler" if "spoiler" in attrs.lower() else None
+        else:
+            tag = TG_TAG_ALIASES.get(tag, tag)
+
+        if not tag or tag not in TG_HTML_TAGS:
+            out.append(_escape_text_segment(match.group(0)))   # يظهر كنص عادي
+            continue
+
+        if closing:
+            if tag in stack:
+                while stack and stack[-1] != tag:
+                    out.append(f"</{stack.pop()}>")
+                if stack:
+                    stack.pop()
+                out.append(f"</{tag}>")
+            continue                                          # وسم إغلاق زائد → يتجاهل
+
+        if self_close == "/":
+            continue
+
+        if tag == "a":
+            href_match = HREF_RE.search(attrs)
+            href = next((g for g in (href_match.groups()[1:] if href_match else []) if g), "")
+            if not href:
+                continue                                      # رابط بدون عنوان → نص عادي
+            out.append(f'<a href="{html.escape(href, quote=True)}">')
+            stack.append("a")
+            continue
+
+        if tag == "tg-emoji":
+            emoji_id_match = re.search(r'emoji-id\s*=\s*"?(\d+)"?', attrs)
+            if not emoji_id_match:
+                continue
+            out.append(f'<tg-emoji emoji-id="{emoji_id_match.group(1)}">')
+            stack.append("tg-emoji")
+            continue
+
+        if tag == "code":
+            # الحفاظ على لغة الكود: <pre><code class="language-python">
+            lang = re.search(r'class\s*=\s*"([^"]*)"', attrs)
+            if lang and "language-" in lang.group(1):
+                out.append(f'<code class="{html.escape(lang.group(1), quote=True)}">')
+            else:
+                out.append("<code>")
+            stack.append("code")
+            continue
+
+        if tag == "pre":
+            out.append("<pre>")
+            stack.append("pre")
+            continue
+
+        out.append(f"<{tag}>")
+        stack.append(tag)
+
+    out.append(_escape_text_segment(text[cursor:]))
+    while stack:
+        out.append(f"</{stack.pop()}>")
+    return "".join(out)
+
+
+def _utf16_index_map(text: str) -> list[int]:
+    """خريطة: وحدة UTF-16 ← فهرس الحرف في بايثون (لحساب offsets تيليجرام)."""
+    mapping: list[int] = []
+    for index, char in enumerate(text):
+        mapping.extend([index] * (2 if ord(char) > 0xFFFF else 1))
+    mapping.append(len(text))
+    return mapping
+
+
+def entities_to_html(text: str, entities) -> str:
+    """
+    يعيد بناء تنسيق تيليجرام الأصلي (اللي عملته من تطبيق تيليجرام نفسه)
+    كنص HTML — فالتنسيق يبقى زي ما هو بعد الحفظ والإرسال.
+    """
+    if not text:
+        return ""
+    if not entities:
+        return _escape_text_segment(text)
+
+    unit_map = _utf16_index_map(text)
+    events = []
+    for entity in entities:
+        info = ENTITY_HTML_TAGS.get(getattr(entity, "type", ""))
+        if not info:
+            continue
+        start = unit_map[min(int(entity.offset), len(unit_map) - 1)]
+        end = unit_map[min(int(entity.offset) + int(entity.length), len(unit_map) - 1)]
+        if end <= start:
+            continue
+        events.append((start, end, entity, info))
+    if not events:
+        return _escape_text_segment(text)
+
+    boundaries = sorted({ev[0] for ev in events} | {ev[1] for ev in events} | {len(text)})
+    out: list[str] = []
+    stack: list[tuple[int, str]] = []
+    cursor = 0
+    for point in boundaries:
+        if point > cursor:
+            out.append(_escape_text_segment(text[cursor:point]))
+            cursor = point
+        while stack and stack[-1][0] <= point:
+            out.append(stack.pop()[1])
+        opening = sorted((ev for ev in events if ev[0] == point),
+                         key=lambda ev: -(ev[1] - ev[0]))
+        for start, end, entity, (tag, attr_key) in opening:
+            if tag == "a":
+                href = getattr(entity, "url", None)
+                user = getattr(entity, "user", None)
+                if href:
+                    open_tag = f'<a href="{html.escape(str(href), quote=True)}">'
+                elif user is not None:
+                    open_tag = f'<a href="tg://user?id={getattr(user, "id", 0)}">'
+                else:
+                    continue
+                close_tag = "</a>"
+            elif tag == "tg-emoji":
+                emoji_id = getattr(entity, "custom_emoji_id", None)
+                if not emoji_id:
+                    continue
+                open_tag = f'<tg-emoji emoji-id="{emoji_id}">'
+                close_tag = "</tg-emoji>"
+            elif tag == "pre" and getattr(entity, "language", None):
+                open_tag = f'<pre><code class="language-{html.escape(entity.language)}">'
+                close_tag = "</code></pre>"
+            else:
+                open_tag = f"<{tag}>"
+                close_tag = f"</{tag}>"
+            stack.append((end, close_tag))
+            out.append(open_tag)
+    while stack:
+        out.append(stack.pop()[1])
+    return "".join(out)
+
+
+def normalize_formatted_text(text: str, entities=None) -> tuple[str, object, list | None]:
+    """
+    المدخل الموحّد للمحرك: يرجع (النص النهائي، parse_mode، entities).
+    • لو جاي من تيليجرام بتنسيق أصلي (entities) → يحوّله HTML ويحافظ عليه.
+    • لو Markdown → HTML.
+    • لو HTML → تنظيف وتصحيح.
+    • لو نص عادي فيه {ID} بريميوم → HTML مع الإيموجي.
+    """
+    text = text or ""
+    if entities:
+        return entities_to_html(text, entities), ParseMode.HTML, None
+    fmt = detect_text_format(text)
+    if fmt == "html":
+        return render_premium_emojis(sanitize_telegram_html(text)), ParseMode.HTML, None
+    if fmt == "markdown":
+        return render_premium_emojis(markdown_to_html(text)), ParseMode.HTML, None
+    if PREMIUM_EMOJI_RE.search(text):
+        return render_premium_emojis(_escape_text_segment(text)), ParseMode.HTML, None
+    return text, None, None
+
+
+def _split_spans(text: str, limit: int) -> list[tuple[int, int]]:
+    """يقسّم النص عند حدود الأسطر/الكلمات ولا يكسر داخل وسم HTML أبداً."""
+    spans: list[tuple[int, int]] = []
+    total = len(text)
+    start = 0
+    while start < total:
+        if start + limit >= total:
+            spans.append((start, total))
+            break
+        window = text[start:start + limit]
+        cut = window.rfind("\n")
+        if cut < limit // 3:
+            space = window.rfind(" ")
+            if space > cut:
+                cut = space
+        if cut <= 0:
+            cut = limit
+        end = start + cut
+        open_tag = text.rfind("<", start, end)
+        if open_tag != -1 and ">" not in text[open_tag:end] and open_tag > start:
+            end = open_tag                      # لا تكسر داخل وسم
+        spans.append((start, end))
+        start = end
+        while start < total and text[start] in " \n\t":
+            start += 1
+    return spans or [(0, total)]
+
+
+def _open_tags_at(text: str, index: int) -> list[str]:
+    """الوسوم المفتوحة في النص قبل الموضع index (لإعادة فتحها في الجزء التالي)."""
+    stack: list[str] = []
+    for match in HTML_TAG_RE.finditer(text[:index]):
+        closing, tag, attrs, self_close = match.groups()
+        tag = TG_TAG_ALIASES.get((tag or "").lower(), (tag or "").lower())
+        if tag not in TG_HTML_TAGS or self_close == "/":
+            continue
+        if tag == "a" and not closing and not HREF_RE.search(attrs or ""):
+            continue
+        if closing:
+            if tag in stack:
+                while stack and stack[-1] != tag:
+                    stack.pop()
+                if stack:
+                    stack.pop()
+        else:
+            stack.append(tag)
+    return stack
+
+
+def split_formatted_text(text: str, parse_mode, limit: int = TG_TEXT_LIMIT) -> list[str]:
+    """
+    يقسّم الرسالة الطويلة مع الحفاظ على التنسيق: كل جزء فيه الوسوم
+    المفتوحة مُعادة الفتح في أوله ومُغلقة في آخره.
+    """
+    if not text:
+        return [text]
+    if parse_mode != ParseMode.HTML or len(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    for start, end in _split_spans(text, max(64, limit - 32)):
+        chunk = text[start:end]
+        if not chunk.strip():
+            continue
+        openers = "".join(f"<{tag}>" for tag in _open_tags_at(text, start))
+        parts.append(sanitize_telegram_html(openers + chunk))
+    return parts or [text[:limit]]
+
+
+def _slice_entities(text: str, start: int, end: int, entities) -> list | None:
+    """يقصّ الكيانات لتناسب جزء النص text[start:end] مع تصحيح الـ offsets."""
+    if not entities:
+        return None
+    prefix_units = utf16_len(text[:start])
+    slice_units = utf16_len(text[start:end])
+    result = []
+    for entity in entities:
+        offset = int(entity.offset)
+        length = int(entity.length)
+        if offset + length <= prefix_units or offset >= prefix_units + slice_units:
+            continue
+        new_offset = max(0, offset - prefix_units)
+        new_length = min(length, slice_units - max(0, prefix_units - offset))
+        new_length = min(new_length, slice_units - new_offset)
+        if new_length <= 0:
+            continue
+        kwargs = {"type": entity.type, "offset": new_offset, "length": new_length}
+        if entity.url:
+            kwargs["url"] = entity.url
+        if entity.user:
+            kwargs["user"] = entity.user
+        if entity.language:
+            kwargs["language"] = entity.language
+        if entity.custom_emoji_id:
+            kwargs["custom_emoji_id"] = entity.custom_emoji_id
+        result.append(MessageEntity(**kwargs))
+    return result or None
+
+
+def split_entities_message(text: str, entities, limit: int = TG_TEXT_LIMIT):
+    """تقسيم رسالة بتنسيق تيليجرام الأصلي (entities) مع تصحيح الكيانات لكل جزء."""
+    text = text or ""
+    if len(text) <= limit:
+        return [(text, list(entities) if entities else None)]
+    parts = []
+    for start, end in _split_spans(text, limit):
+        chunk = text[start:end]
+        if not chunk.strip():
+            continue
+        parts.append((chunk, _slice_entities(text, start, end, entities)))
+    return parts or [(text[:limit], None)]
+
+
+async def _send_one_part(bot, chat_id: int, text: str, parse_mode, entities, limit: int,
+                         kwargs: dict):
+    if len(text) > limit:
+        text = text[:limit]
+    try:
+        if parse_mode:
+            return await bot.send_message(chat_id, text, parse_mode=parse_mode, **kwargs)
+        if entities:
+            return await bot.send_message(chat_id, text, entities=entities, **kwargs)
+        return await bot.send_message(chat_id, text, **kwargs)
+    except BadRequest as e:
+        # حماية من الأخطاء: ما نضيعش الرسالة بسبب خطأ تنسيق
+        logger.warning(f"رفض تيليجرام التنسيق ({e}) — إعادة الإرسال كنص عادي")
+        plain = strip_html_tags(text) if parse_mode else text
+        try:
+            kwargs.pop("parse_mode", None)
+            kwargs.pop("entities", None)
+            return await bot.send_message(chat_id, plain[:limit], **kwargs)
+        except TelegramError as e2:
+            logger.error(f"فشل الإرسال حتى كنص عادي: {e2}")
+            return None
+    except TelegramError as e:
+        logger.error(f"فشل إرسال رسالة منسّقة: {e}")
+        return None
+
+
+async def send_formatted(bot, chat_id: int, text: str, entities=None,
+                         limit: int = TG_TEXT_LIMIT, **kwargs) -> list:
+    """
+    يرسل رسالة بأي تنسيق (تيليجرام/Markdown/HTML) ويقسّمها لو طويلة،
+    والكيبورد يُلحق بآخر جزء. لا يفشل الإرسال بسبب التنسيق أبداً.
+    """
+    markup = kwargs.pop("reply_markup", None)
+    norm_text, parse_mode, norm_entities = normalize_formatted_text(text, entities)
+    if parse_mode:
+        chunks: list[tuple[str, object, list | None]] = [
+            (part, parse_mode, None) for part in split_formatted_text(norm_text, parse_mode, limit)
+        ]
+    else:
+        chunks = [
+            (part, None, ents) for part, ents in split_entities_message(norm_text, norm_entities, limit)
+        ]
+    sent = []
+    for index, (part_text, part_mode, part_entities) in enumerate(chunks):
+        part_kwargs = dict(kwargs)
+        if markup is not None and index == len(chunks) - 1:
+            part_kwargs["reply_markup"] = markup
+        message = await _send_one_part(
+            bot, chat_id, part_text, part_mode, part_entities, limit, part_kwargs
+        )
+        if message is not None:
+            sent.append(message)
+    return sent
+
+
+def captured_text(msg) -> str:
+    """
+    ياخد نص رسالة المالك مع الحفاظ على تنسيق تيليجرام الأصلي:
+    لو المالك اختار نص وعمله عريض/مائل/رابط من تطبيق تيليجرام نفسه،
+    نحوّله HTML عشان يفضل زي ما هو بعد الحفظ والإرسال.
+    """
+    text = getattr(msg, "text", None) or getattr(msg, "caption", None) or ""
+    entities = getattr(msg, "entities", None) or getattr(msg, "caption_entities", None)
+    if entities:
+        return entities_to_html(text, entities)
+    return text
+
+
+# ═══════════════════════════════════════════════════════════════
+#  📝 رسالة البدء المحسّنة: ميديا + كابشن + أزرار + معاينة روابط
+# ═══════════════════════════════════════════════════════════════
+
+DEFAULT_WELCOME_MEDIA = {
+    "enabled": False,
+    "kind": "photo",          # photo | video | animation | sticker
+    "file_id": "",
+    "caption": "",
+}
+
+DEFAULT_WELCOME_PREVIEW = {
+    "disabled": True,         # إخفاء المعاينة = ضجيج أقل (الوضع الحالي)
+    "url": "",                # رابط معاينة مخصص
+    "small": False,           # معاينة صغيرة
+    "large": False,           # معاينة كبيرة
+    "above": False,           # المعاينة فوق النص
+}
+
+WELCOME_MEDIA_KINDS = {
+    "photo": ("🖼 صورة", "send_photo", "photo"),
+    "video": ("🎬 فيديو", "send_video", "video"),
+    "animation": ("🎞 GIF", "send_animation", "animation"),
+    "sticker": ("🃏 ملصق", "send_sticker", "sticker"),
+}
+WELCOME_MEDIA_LABELS = {k: v[0] for k, v in WELCOME_MEDIA_KINDS.items()}
+
+
+def welcome_link_preview(s: dict) -> LinkPreviewOptions:
+    """
+    يبني إعدادات معاينة الروابط لرسالة البدء (تتجاوز الإعداد العام للبوت،
+    فالرسالة الوحيدة اللي فيها روابط تظهر معاينتها بالظبط زي ما المالك عايز).
+    """
+    p = s.get("welcome_preview") or DEFAULT_WELCOME_PREVIEW
+    return LinkPreviewOptions(
+        is_disabled=bool(p.get("disabled", True)),
+        url=(str(p.get("url") or "").strip() or None),
+        prefer_small_media=bool(p.get("small")),
+        prefer_large_media=bool(p.get("large")),
+        show_above_text=bool(p.get("above")),
+    )
+
+
+async def send_welcome(ctx, update, user, s: dict | None = None) -> list:
+    """
+    يرسل رسالة البدء بكل التفاصيل:
+      ميديا (صورة/فيديو/GIF/ملصق) + كابشن منسّق + الأزرار + معاينة الروابط.
+    ملاحظة: الملصقات لا تدعم الكابشن في تيليجرام، فالكابشن بيتبعت مع رسالة النص.
+    """
+    s = s or load_settings()
+    uid = user.id
+    msg = update.effective_message
+    variables = {"user_link": user_mention(user), "owner_id": str(OWNER_ID), "name": user_name(user)}
+    preview = welcome_link_preview(s)
+    buttons = welcome_keyboard(s.get("buttons"))
+    notify_kw = {
+        "protect_content": bool(s.get("content_protection")),
+        "disable_notification": bool(s.get("silent")),
+    }
+    sent: list = []
+
+    media = s.get("welcome_media") or {}
+    kind = str(media.get("kind") or "photo")
+    file_id = str(media.get("file_id") or "")
+    caption_text = ""
+    media_with_caption = False
+    if media.get("enabled") and file_id and kind in WELCOME_MEDIA_KINDS:
+        _, method, field = WELCOME_MEDIA_KINDS[kind]
+        caption_text = _render_template(str(media.get("caption") or ""), variables)
+        norm_caption, cap_mode, cap_ents = normalize_formatted_text(caption_text or None)
+        # الملصق ما يقبلش كابشن في تيليجرام → الكابشن هيروح مع رسالة النص
+        media_with_caption = (
+            kind != "sticker" and bool(norm_caption) and len(norm_caption) <= TG_CAPTION_LIMIT
+        )
+        media_kwargs = {"chat_id": uid, field: file_id}
+        media_kwargs.update(notify_kw)
+        if msg is not None:
+            media_kwargs["reply_parameters"] = ReplyParameters(msg.message_id)
+        if media_with_caption:
+            media_kwargs["caption"] = norm_caption
+            if cap_mode:
+                media_kwargs["parse_mode"] = cap_mode
+            elif cap_ents:
+                media_kwargs["caption_entities"] = cap_ents
+            media_kwargs["reply_markup"] = buttons
+        try:
+            sent.append(await getattr(ctx.bot, method)(**media_kwargs))
+        except BadRequest as e:
+            logger.warning(f"تعذّر إرسال ميديا رسالة البدء ({kind}): {e}")
+        except TelegramError as e:
+            logger.error(f"خطأ في إرسال ميديا رسالة البدء: {e}")
+
+    # الكابشن وحده يكفي كرسالة بدء (الأزرار اتعلقت عليه)
+    if media_with_caption:
+        return sent
+
+    text = _render_template(s.get("welcome") or DEFAULT_WELCOME, variables)
+    # الملصق: الكابشن بيتضاف فوق رسالة النص (لأن تيليجرام ما يسمحش بكابشن للملصق)
+    if caption_text.strip() and sent:
+        text = f"{caption_text.strip()}\n\n{text}".strip() if text.strip() else caption_text.strip()
+    if not text.strip():
+        return sent
+    sent.extend(await send_formatted(
+        ctx.bot, uid, text, reply_markup=buttons,
+        link_preview_options=preview, **notify_kw,
+    ))
+    return sent
+
+
+
+# ═══════════════════════════════════════════════════════════════
 #  الرد التلقائي بالكلمات المسجلة
 # ═══════════════════════════════════════════════════════════════
 
@@ -2462,6 +3177,635 @@ def quick_reply_menu_view():
     return text, kb
 
 # ═══════════════════════════════════════════════════════════════
+#  ⌨️ محرر الكيبورد المتقدّم
+#  ➕ إضافة زر لأي صف · ➖ حذف بضغطة · ↔️ نقل بين الصفوف
+#  🔁 مبادلة زرّين · 📑 فصل صف · 🔗 دمج صفّين
+#  ولكل زر: 🎨 4 ألوان (⚪ 🔴 🟢 🔵) و ✨ إيموجي عادي أو بريميوم
+# ═══════════════════════════════════════════════════════════════
+
+KB_ROWS_PER_PAGE = 4          # صفوف معروضة في الصفحة (حماية من حد الـ100 زر)
+
+
+async def _kb_edit_screen(query, text: str, kb=None):
+    """يعدّل شاشة المحرر بأمان: يتجاهل 'message is not modified' ويحمي من أي خطأ."""
+    try:
+        await query.edit_message_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+    except BadRequest as e:
+        if "not modified" in str(e).lower():
+            return
+        logger.warning(f"تعذّر تعديل شاشة المحرر: {e}")
+    except TelegramError as e:
+        logger.warning(f"تعذّر تعديل شاشة المحرر: {e}")
+
+
+def captured_button_text(msg) -> str:
+    """
+    نص زر من رسالة المالك: الأزرار في تيليجرام ما بتدعمش تنسيقات،
+    لكن الإيموجي البريميوم بيتحوّل تلقائياً لصيغة {ID} عشان يظهر كأيقونة.
+    """
+    text = getattr(msg, "text", "") or ""
+    entities = getattr(msg, "entities", None) or []
+    customs = sorted(
+        (e for e in entities if e.type == MessageEntity.CUSTOM_EMOJI),
+        key=lambda e: -int(e.offset),
+    )
+    if not customs:
+        return text.strip()
+    unit_map = _utf16_index_map(text)
+    for entity in customs:
+        start = unit_map[min(int(entity.offset), len(unit_map) - 1)]
+        end = unit_map[min(int(entity.offset) + int(entity.length), len(unit_map) - 1)]
+        if end <= start or not entity.custom_emoji_id:
+            continue
+        text = text[:start] + "{" + str(entity.custom_emoji_id) + "}" + text[end:]
+    return text.strip()
+
+
+def _kb_page_of(row_index: int) -> int:
+    return max(0, row_index) // KB_ROWS_PER_PAGE
+
+
+def _get_button(row_index: int, button_index: int):
+    """يرجع الزر المطلوب أو None لو الإحداثيات خارج النطاق."""
+    rows = button_rows()
+    if 0 <= row_index < len(rows) and 0 <= button_index < len(rows[row_index]):
+        return rows[row_index][button_index]
+    return None
+
+
+def _button_is_premium(button: dict) -> bool:
+    return bool(PREMIUM_EMOJI_RE.search(str(button.get("text") or "")))
+
+
+def keyboard_editor_view(page: int = 0):
+    """الشاشة الرئيسية للمحرر: كل زر بأدواته وكل صف بإجراءاته."""
+    rows = button_rows()
+    total_pages = max(1, -(-len(rows) // KB_ROWS_PER_PAGE))
+    page = max(0, min(int(page), total_pages - 1))
+    first = page * KB_ROWS_PER_PAGE
+    shown = rows[first:first + KB_ROWS_PER_PAGE]
+
+    lines = [
+        "⌨️ <b>محرر كيبورد رسالة البدء</b>",
+        f"📄 الصفوف: {len(rows)} · صفحة {page + 1}/{total_pages}",
+        "",
+        "لكل زر: 🎨 اللون · ✨ الإيموجي · ↔️ النقل والمبادلة · ➖ الحذف",
+        "ولكل صف: ➕ زر جديد · 📑 فصل · 🔗 دمج",
+        "",
+    ]
+    kb: list[list] = []
+    counter = 0
+    for offset, row in enumerate(shown):
+        r = first + offset
+        lines.append(f"🔹 <b>الصف {r + 1}</b> — {len(row)} زر")
+        for i, b in enumerate(row):
+            counter += 1
+            style = b.get("style", "success")
+            premium = "✨ بريميوم" if _button_is_premium(b) else "⚪ عادي"
+            url_view = html.escape(str(b.get("url") or "")) or "⚠️ <b>بدون رابط</b>"
+            lines.append(
+                f"{counter}. {BUTTON_STYLE_LABELS.get(style, style)} · {premium}\n"
+                f"    النص: <code>{html.escape(str(b.get('text') or ''))}</code>\n"
+                f"    الرابط: {url_view}"
+            )
+            kb.append([
+                _mk_btn(f"✏️ {counter}. {str(b.get('text') or 'زر')}"[:60],
+                        style="primary", callback_data=f"kb_btn:{r}:{i}"),
+                _mk_btn("🎨", callback_data=f"kb_style_menu:{r}:{i}"),
+                _mk_btn("↔️", callback_data=f"kb_move_menu:{r}:{i}"),
+                _mk_btn("➖", style="danger", callback_data=f"kb_del_btn:{r}:{i}"),
+            ])
+        row_actions = [_mk_btn(f"➕ زر في الصف {r + 1}", style="success",
+                               callback_data=f"kb_add_btn:{r}")]
+        if len(row) > 1:
+            row_actions.append(_mk_btn("📑 فصل الصف", callback_data=f"kb_split:{r}"))
+        if r + 1 < len(rows):
+            row_actions.append(_mk_btn("🔗 دمج مع التالي", callback_data=f"kb_merge:{r}"))
+        kb.append(row_actions)
+        lines.append("")
+
+    if not rows:
+        lines.append("لا توجد أزرار بعد — اضغط «➕ صف جديد».")
+
+    nav = []
+    if page > 0:
+        nav.append(_mk_btn("⬅️ الصفحة السابقة", callback_data=f"kb_editor:{page - 1}"))
+    if page + 1 < total_pages:
+        nav.append(_mk_btn("➡️ الصفحة التالية", callback_data=f"kb_editor:{page + 1}"))
+    if nav:
+        kb.append(nav)
+    kb.append([
+        _mk_btn("➕ صف جديد", style="success", callback_data="kb_add_row"),
+        _mk_btn("👁️ معاينة", style="primary", callback_data="kb_preview"),
+        _mk_btn("↩️ رجوع", callback_data="edit_buttons"),
+    ])
+
+    text = "\n".join(lines)
+    if len(text) > 3900:            # حماية من حد طول الرسالة
+        text = text[:3900] + "\n…"
+    return text, InlineKeyboardMarkup(kb)
+
+
+def button_editor_view(r: int, i: int):
+    """شاشة تعديل زر واحد."""
+    b = _get_button(r, i)
+    if not b:
+        return keyboard_editor_view(_kb_page_of(r))
+    style = b.get("style", "success")
+    premium = _button_is_premium(b)
+    text = (
+        f"⌨️ <b>تعديل الزر</b> (صف {r + 1} · زر {i + 1})\n\n"
+        f"النص: <code>{html.escape(str(b.get('text') or ''))}</code>\n"
+        f"الرابط: <code>{html.escape(str(b.get('url') or ''))}</code>\n"
+        f"اللون: {BUTTON_STYLE_LABELS.get(style, style)}\n"
+        f"الإيموجي: {'✨ بريميوم' if premium else '⚪ عادي'}\n\n"
+        "💡 في نص الزر تقدر تكتب <code>{ID}</code> لإيموجي بريميوم "
+        "(هيظهر كإيموجي عادي لغير المشتركين في بريميوم).\n"
+        "💡 الزر لازم يكون له رابط عشان يظهر للمستخدم."
+    )
+    kb = [
+        [_mk_btn("✏️ تغيير النص", style="primary", callback_data=f"kb_edit_text:{r}:{i}")],
+        [_mk_btn("🔗 تغيير الرابط", style="primary", callback_data=f"kb_edit_url:{r}:{i}")],
+        [
+            _mk_btn(f"🎨 {BUTTON_STYLE_LABELS.get(style, style)}",
+                    callback_data=f"kb_style_menu:{r}:{i}"),
+            _mk_btn(f"✨ {'بريميوم' if premium else 'عادي'}",
+                    callback_data=f"kb_emoji_menu:{r}:{i}"),
+        ],
+        [_mk_btn("↔️ نقل / مبادلة", callback_data=f"kb_move_menu:{r}:{i}")],
+        [_mk_btn("🗑 حذف الزر", style="danger", callback_data=f"kb_del_btn:{r}:{i}")],
+        [
+            _mk_btn("👁️ معاينة الكيبورد", style="success", callback_data="kb_preview"),
+            _mk_btn("↩️ رجوع للمحرر", callback_data=f"kb_editor:{_kb_page_of(r)}"),
+        ],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+
+def button_style_view(r: int, i: int):
+    """🎨 اختيار لون الزر من 4 أنماط."""
+    b = _get_button(r, i) or {}
+    current = b.get("style", "success")
+    text = (
+        f"🎨 <b>لون الزر</b> — {html.escape(str(b.get('text') or ''))}\n\n"
+        f"الحالي: {BUTTON_STYLE_LABELS.get(current, current)}"
+    )
+    kb = [
+        [
+            _mk_btn(BUTTON_STYLE_LABELS["default"], style=None,
+                    callback_data=f"kb_style:{r}:{i}:default"),
+            _mk_btn(BUTTON_STYLE_LABELS["danger"], style="danger",
+                    callback_data=f"kb_style:{r}:{i}:danger"),
+        ],
+        [
+            _mk_btn(BUTTON_STYLE_LABELS["success"], style="success",
+                    callback_data=f"kb_style:{r}:{i}:success"),
+            _mk_btn(BUTTON_STYLE_LABELS["primary"], style="primary",
+                    callback_data=f"kb_style:{r}:{i}:primary"),
+        ],
+        [_mk_btn("↩️ رجوع", callback_data=f"kb_btn:{r}:{i}")],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+
+def button_emoji_view(r: int, i: int):
+    """✨ إيموجي الزر: عادي أو بريميوم."""
+    b = _get_button(r, i) or {}
+    premium = _button_is_premium(b)
+    text = (
+        f"✨ <b>إيموجي الزر</b> — {html.escape(str(b.get('text') or ''))}\n\n"
+        f"الحالي: {'✨ بريميوم' if premium else '⚪ عادي'}\n\n"
+        "<b>بريميوم:</b> ابعت الإيموجي البريميوم نفسه في الرسالة الجاية "
+        "(أو اكتب الآيدي بتاعه) والبوت يربطه بالزر تلقائياً، "
+        "ولو المستخدم مش مشترك في بريميوم هيشوف إيموجي عادي بدل منه.\n"
+        "<b>عادي:</b> يشيل الإيموجي البريميوم من الزر."
+    )
+    kb = [
+        [_mk_btn("✨ تحويل لبريميوم", style="primary", callback_data=f"kb_emoji:{r}:{i}:premium")],
+        [_mk_btn("⚪ إيموجي عادي", callback_data=f"kb_emoji:{r}:{i}:normal")],
+        [_mk_btn("↩️ رجوع", callback_data=f"kb_btn:{r}:{i}")],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+
+def button_move_view(r: int, i: int):
+    """↔️ نقل الزر في أي اتجاه + مبادلته مع زر تاني."""
+    b = _get_button(r, i) or {}
+    text = (
+        f"↔️ <b>نقل الزر</b> — {html.escape(str(b.get('text') or ''))}\n"
+        f"موضعه الحالي: صف {r + 1} · زر {i + 1}\n\n"
+        "⬅️ ➡️ نقل داخل نفس الصف\n"
+        "⬆️ ⬇️ نقل للصف اللي فوق/تحت\n"
+        "🔁 مبادلة مع أي زر تاني\n"
+        "📑 فصل الصف من عند الزر ده (يبقى صفّين)"
+    )
+    kb = [
+        [
+            _mk_btn("⬆️ فوق", callback_data=f"kb_move:{r}:{i}:up"),
+            _mk_btn("⬇️ تحت", callback_data=f"kb_move:{r}:{i}:down"),
+        ],
+        [
+            _mk_btn("⬅️ يسار", callback_data=f"kb_move:{r}:{i}:left"),
+            _mk_btn("➡️ يمين", callback_data=f"kb_move:{r}:{i}:right"),
+        ],
+        [_mk_btn("🔁 مبادلة مع زر", style="primary", callback_data=f"kb_swap:{r}:{i}")],
+        [_mk_btn("📑 فصل الصف من هنا", callback_data=f"kb_split_at:{r}:{i}")],
+        [_mk_btn("↩️ رجوع", callback_data=f"kb_btn:{r}:{i}")],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+
+def button_swap_pick_view(r: int, i: int):
+    """🔁 اختيار الزر التاني للمبادلة."""
+    rows = button_rows()
+    lines = [f"🔁 <b>مبادلة الزر</b> (صف {r + 1} · زر {i + 1}) مع:"]
+    kb: list[list] = []
+    counter = 0
+    for r2, row in enumerate(rows):
+        for i2 in range(len(row)):
+            counter += 1
+            if (r2, i2) == (r, i):
+                lines.append(f"{counter}. ↩️ (ده الزر نفسه)")
+                continue
+            other = rows[r2][i2]
+            lines.append(f"{counter}. {html.escape(str(other.get('text') or ''))}")
+            kb.append([_mk_btn(f"🔁 {counter}. {str(other.get('text') or 'زر')}"[:60],
+                               callback_data=f"kb_swap_with:{r}:{i}:{r2}:{i2}")])
+        if len(kb) >= 40:
+            lines.append("… (باقي الأزرار في صفحات المحرر)")
+            break
+    kb.append([_mk_btn("↩️ رجوع", callback_data=f"kb_move_menu:{r}:{i}")])
+    text = "\n".join(lines)
+    return text[:3900], InlineKeyboardMarkup(kb)
+
+
+# ── إجراءات المحرر ─────────────────────────────────────────────
+
+def kb_delete_button(r: int, i: int) -> str:
+    """➖ حذف زر بضغطة واحدة (ولو الصف فضى يتحذف معاه)."""
+    rows = button_rows()
+    if not (0 <= r < len(rows)) or not (0 <= i < len(rows[r])):
+        return "الزر مش موجود."
+    removed = rows[r].pop(i)
+    if not rows[r]:
+        rows.pop(r)
+    save_button_rows(rows)
+    return f"🗑 تم حذف الزر «{removed.get('text')}»."
+
+
+def kb_add_button(r: int, text: str) -> str:
+    """➕ إضافة زر لصف موجود من سطر «النص | الرابط | الستايل»."""
+    parts = [p.strip() for p in (text or "").split("|")]
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return ("⚠️ الصيغة: <code>النص | الرابط | الستايل</code>\n"
+                "مثال: <code>قناتي | https://t.me/x | primary</code>")
+    button = _clean_button({
+        "text": parts[0],
+        "url": parts[1],
+        "style": parts[2] if len(parts) > 2 else "success",
+    })
+    rows = button_rows()
+    if not (0 <= r <= len(rows)):
+        r = max(0, len(rows) - 1)
+    if r >= len(rows):
+        rows.append([])
+    if len(rows[r]) >= 8:
+        return "⚠️ تيليجرام يسمح بـ 8 أزرار في الصف الواحد كحد أقصى."
+    rows[r].append(button)
+    save_button_rows(rows)
+    return f"✅ تم إضافة الزر «{button['text']}» للصف {r + 1}."
+
+
+def kb_move_button(r: int, i: int, direction: str) -> str:
+    """↔️ نقل زر: داخل الصف (يسار/يمين) أو بين الصفوف (فوق/تحت)."""
+    rows = button_rows()
+    if not (0 <= r < len(rows)) or not (0 <= i < len(rows[r])):
+        return "الزر مش موجود."
+    button = rows[r][i]
+    if direction == "left":
+        if i == 0:
+            return "الزر في أول الصف بالفعل."
+        rows[r][i - 1], rows[r][i] = rows[r][i], rows[r][i - 1]
+    elif direction == "right":
+        if i == len(rows[r]) - 1:
+            return "الزر في آخر الصف بالفعل."
+        rows[r][i + 1], rows[r][i] = rows[r][i], rows[r][i + 1]
+    elif direction == "up":
+        if r == 0:
+            return "ده أول صف."
+        rows[r].pop(i)
+        if not rows[r]:
+            rows.pop(r)
+            target_row, target_index = r - 1, len(rows[r - 1])
+        else:
+            target_row, target_index = r - 1, min(i, len(rows[r - 1]))
+        rows[target_row].insert(target_index, button)
+    elif direction == "down":
+        if r == len(rows) - 1:
+            return "ده آخر صف."
+        rows[r].pop(i)
+        target_row = r + 1
+        if not rows[r]:
+            rows.pop(r)
+            target_row = r
+        target_index = min(i, len(rows[target_row]))
+        rows[target_row].insert(target_index, button)
+    else:
+        return "اتجاه غير معروف."
+    save_button_rows(rows)
+    return f"↔️ تم نقل الزر «{button.get('text')}» ({direction})."
+
+
+def kb_swap_buttons(r1: int, i1: int, r2: int, i2: int) -> str:
+    """🔁 مبادلة زرّين في أي مكان في الكيبورد."""
+    rows = button_rows()
+    if not (0 <= r1 < len(rows) and 0 <= i1 < len(rows[r1])):
+        return "الزر الأول مش موجود."
+    if not (0 <= r2 < len(rows) and 0 <= i2 < len(rows[r2])):
+        return "الزر التاني مش موجود."
+    rows[r1][i1], rows[r2][i2] = rows[r2][i2], rows[r1][i1]
+    save_button_rows(rows)
+    return "🔁 تم مبادلة الزرّين."
+
+
+def kb_split_row(r: int, i: int | None = None) -> str:
+    """📑 تقسيم الصف إلى صفّين (في النص، أو من عند زر معيّن)."""
+    rows = button_rows()
+    if not (0 <= r < len(rows)):
+        return "الصف مش موجود."
+    row = rows[r]
+    cut = len(row) // 2 if i is None else int(i)
+    if len(row) < 2:
+        return "⚠️ الصف فيه زر واحد — ما ينفعش يتقسم."
+    if cut <= 0 or cut >= len(row):
+        return "⚠️ نقطة الفصل لازم تكون بين أول وآخر زر في الصف."
+    rows.insert(r + 1, row[cut:])
+    rows[r] = row[:cut]
+    save_button_rows(rows)
+    return f"📑 تم تقسيم الصف {r + 1} إلى صفّين ({cut} + {len(row) - cut})."
+
+
+def kb_merge_rows(r: int) -> str:
+    """🔗 دمج صف مع الصف اللي بعده."""
+    rows = button_rows()
+    if not (0 <= r < len(rows) - 1):
+        return "⚠️ ما فيش صف تالي للدمج."
+    merged = rows[r] + rows[r + 1]
+    if len(merged) > 8:
+        return f"⚠️ الدمج هينتج {len(merged)} أزرار في صف واحد (الحد 8)."
+    rows[r] = merged
+    rows.pop(r + 1)
+    save_button_rows(rows)
+    return f"🔗 تم دمج الصفّين في صف واحد ({len(merged)} أزرار)."
+
+
+def kb_set_style(r: int, i: int, style: str) -> str:
+    """🎨 تغيير لون الزر."""
+    rows = button_rows()
+    if not (0 <= r < len(rows) and 0 <= i < len(rows[r])):
+        return "الزر مش موجود."
+    if style not in VALID_BUTTON_STYLES:
+        style = "success"
+    rows[r][i]["style"] = style
+    save_button_rows(rows)
+    return f"🎨 تم تغيير لون الزر إلى {BUTTON_STYLE_LABELS[style]}."
+
+
+def kb_set_emoji_normal(r: int, i: int) -> str:
+    """✨ إرجاع الزر لإيموجي عادي (شيل صيغة البريميوم)."""
+    rows = button_rows()
+    if not (0 <= r < len(rows) and 0 <= i < len(rows[r])):
+        return "الزر مش موجود."
+    button = rows[r][i]
+    new_text = PREMIUM_EMOJI_RE.sub(PREMIUM_EMOJI_FALLBACK, str(button.get("text") or ""))
+    new_text = re.sub(r"\s{2,}", " ", new_text).strip()
+    button["text"] = new_text[:64]
+    button.pop("emoji_id", None)
+    save_button_rows(rows)
+    return "⚪ تم تحويل إيموجي الزر إلى عادي."
+
+
+def kb_set_emoji_premium(r: int, i: int, emoji_id: str) -> str:
+    """✨ ربط إيموجي بريميوم بالزر (مع إيموجي بديل لغير المشتركين)."""
+    rows = button_rows()
+    if not (0 <= r < len(rows) and 0 <= i < len(rows[r])):
+        return "الزر مش موجود."
+    emoji_id = str(emoji_id or "").strip()
+    if not emoji_id.isdigit() or not PREMIUM_EMOJI_RE.fullmatch("{" + emoji_id + "}"):
+        return ("⚠️ آيدي إيموجي البريميوم لازم يكون أرقاماً (5 أرقام أو أكتر).\n"
+                "تجيب الآيدي بأمر <code>/emoji_id</code> أو تبعت الإيموجي نفسه.")
+    button = rows[r][i]
+    text = str(button.get("text") or "")
+    if PREMIUM_EMOJI_RE.search(text):
+        text = PREMIUM_EMOJI_RE.sub("{" + emoji_id + "}", text, count=1)
+    else:
+        text = ("{" + emoji_id + "} " + text).strip()
+    button["text"] = text[:64]
+    button["emoji_id"] = emoji_id
+    save_button_rows(rows)
+    return f"✨ تم ربط إيموجي بريميوم <code>{emoji_id}</code> بالزر."
+
+
+# ═══════════════════════════════════════════════════════════════
+#  📝 رسالة البدء المحسّنة — ميديا (ملصق/صورة/فيديو/GIF) + كابشن
+#     + تخصيص كامل لمعاينة الروابط (إظهار/إخفاء/رابط/حجم/موضع)
+# ═══════════════════════════════════════════════════════════════
+
+def start_message_menu_view():
+    """شاشة إعداد رسالة البدء: الميديا والكابشن ومعاينة الروابط."""
+    s = load_settings()
+    media = s.get("welcome_media") or dict(DEFAULT_WELCOME_MEDIA)
+    preview = s.get("welcome_preview") or dict(DEFAULT_WELCOME_PREVIEW)
+    has_media = bool(media.get("enabled") and media.get("file_id"))
+    kind_label = WELCOME_MEDIA_LABELS.get(str(media.get("kind")), "—")
+    caption = str(media.get("caption") or "")
+    caption_view = html.escape(caption[:120]) or "—"
+    preview_view = "🚫 مخفية (ضجيج أقل)" if preview.get("disabled") else "👁️ ظاهرة"
+    size_view = ("🔽 صغيرة" if preview.get("small")
+                 else "🔼 كبيرة" if preview.get("large") else "عادية")
+    position_view = "⬆️ فوق النص" if preview.get("above") else "⬇️ تحت النص"
+    url_view = html.escape(str(preview.get("url") or "")) or "—"
+
+    text = (
+        "📝 <b>رسالة البدء المحسّنة</b>\n\n"
+        f"🎞 الميديا: {'🟢 مفعّلة' if has_media else '🔴 معطّلة'}\n"
+        f"   النوع: {kind_label}\n"
+        f"   الكابشن: <code>{caption_view}</code>\n\n"
+        "🔗 <b>معاينة الروابط</b>\n"
+        f"   الحالة: {preview_view}\n"
+        f"   الرابط المخصص: <code>{url_view}</code>\n"
+        f"   الحجم: {size_view} · الموضع: {position_view}\n\n"
+        "💡 الملصقات في تيليجرام ما بتقبلش كابشن — فالكابشن بيتبعت تلقائياً "
+        "فوق رسالة النص والأزرار.\n"
+        "💡 النص نفسه بيتكتب بأي تنسيق: من تيليجرام مباشرة، أو Markdown، "
+        "أو HTML — 🔄 المحرك بيفهمه تلقائياً."
+    )
+    kb = [
+        [
+            _mk_btn("📎 إرسال ميديا", style="primary", callback_data="start_media_upload"),
+            _mk_btn("✏️ تعديل الكابشن", style="primary", callback_data="welcome_caption_edit"),
+        ],
+        [
+            _mk_btn(f"{'🔴 تعطيل' if has_media else '🟢 تفعيل'} الميديا",
+                    style="danger" if has_media else "success",
+                    callback_data="welcome_media_toggle"),
+            _mk_btn("🗑 حذف الميديا", style="danger", callback_data="welcome_media_clear"),
+        ],
+        [_mk_btn(f"🔗 معاينة الروابط — {preview_view}", style="primary",
+                 callback_data="preview_menu")],
+        [
+            _mk_btn("👁️ معاينة الرسالة كاملة", style="success", callback_data="kb_preview"),
+            _mk_btn("↩️ رجوع للوحة", callback_data="back_panel"),
+        ],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+
+def preview_menu_view():
+    """🔗 تخصيص معاينة الروابط في رسالة البدء."""
+    s = load_settings()
+    preview = s.get("welcome_preview") or dict(DEFAULT_WELCOME_PREVIEW)
+    disabled = bool(preview.get("disabled", True))
+    text = (
+        "🔗 <b>معاينة الروابط في رسالة البدء</b>\n\n"
+        f"الحالة: {'🚫 مخفية' if disabled else '👁️ ظاهرة'}\n"
+        f"الرابط المخصص: <code>{html.escape(str(preview.get('url') or '')) or '—'}</code>\n"
+        f"الحجم: {'🔽 صغيرة' if preview.get('small') else '🔼 كبيرة' if preview.get('large') else 'عادية'}\n"
+        f"الموضع: {'⬆️ فوق النص' if preview.get('above') else '⬇️ تحت النص'}\n\n"
+        "💡 الإخفاء الكامل = أقل ضجيج للمستخدم.\n"
+        "💡 الرابط المخصص يخلي أي رسالة تبدأ تظهر معاينة موقع معيّن "
+        "(حتى لو مفيش روابط في النص).\n"
+        "💡 الحجم الصغير/الكبير والموضع فوق/تحت النص يشتغلوا لما المعاينة ظاهرة."
+    )
+    kb = [
+        [
+            _mk_btn(f"{'✅ ' if disabled else ''}🚫 إخفاء المعاينة",
+                    style="danger" if not disabled else "success",
+                    callback_data="preview_off"),
+            _mk_btn(f"{'✅ ' if not disabled else ''}👁️ إظهار المعاينة",
+                    style="success" if disabled else "primary",
+                    callback_data="preview_on"),
+        ],
+        [
+            _mk_btn("🔗 رابط مخصص", style="primary", callback_data="preview_url_edit"),
+            _mk_btn("🗑 حذف الرابط", style="danger", callback_data="preview_url_clear"),
+        ],
+        [
+            _mk_btn(f"{'✅ ' if preview.get('small') else ''}🔽 صغيرة",
+                    style="primary" if preview.get("small") else None,
+                    callback_data="preview_small"),
+            _mk_btn(f"{'✅ ' if preview.get('large') else ''}🔼 كبيرة",
+                    style="primary" if preview.get("large") else None,
+                    callback_data="preview_large"),
+        ],
+        [
+            _mk_btn(f"{'✅ ' if preview.get('above') else ''}⬆️ فوق النص",
+                    style="primary" if preview.get("above") else None,
+                    callback_data="preview_above"),
+            _mk_btn(f"{'✅ ' if not preview.get('above') else ''}⬇️ تحت النص",
+                    style="primary" if not preview.get("above") else None,
+                    callback_data="preview_below"),
+        ],
+        [
+            _mk_btn("👁️ معاينة الرسالة", style="success", callback_data="kb_preview"),
+            _mk_btn("↩️ رجوع", callback_data="start_msg_menu"),
+        ],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+
+def _save_welcome_preview(**changes) -> dict:
+    """يعدّل إعدادات معاينة الروابط مع مراعاة قواعد تيليجرام."""
+    s = load_settings()
+    preview = dict(s.get("welcome_preview") or DEFAULT_WELCOME_PREVIEW)
+    # الحجم الصغير والكبير ضدّان — التغيير الجديد هو اللي يكسب
+    if changes.get("small"):
+        changes["large"] = False
+    if changes.get("large"):
+        changes["small"] = False
+    preview.update(changes)
+    if preview.get("small"):
+        preview["large"] = False
+    if preview.get("large"):
+        preview["small"] = False
+    # رابط مخصص معناه إن المعاينة ظاهرة
+    if str(preview.get("url") or "").strip():
+        preview["disabled"] = False
+    preview["url"] = str(preview.get("url") or "").strip()
+    s["welcome_preview"] = preview
+    save_settings(s)
+    return preview
+
+
+def menu_button_view():
+    """⌨️ زر /start الجانبي الثابت في واجهة المستخدم."""
+    s = load_settings()
+    enabled = bool(s.get("menu_button_enabled", True))
+    text = (
+        "⌨️ <b>زر «بدء محادثة» الجانبي</b>\n\n"
+        f"الحالة: {'🟢 مفعّل' if enabled else '🔴 معطّل'}\n\n"
+        "لما يكون مفعّل، بيظهر عند المستخدم زر قائمة ثابت جنب مربع الكتابة "
+        "فيه <code>/start — بدء محادثة</code> وباقي الأوامر، "
+        "فيضغط عليه من غير ما يكتب حاجة.\n\n"
+        "💡 التغيير بيتطبّق فوراً على كل المستخدمين عند الضغط."
+    )
+    kb = [
+        [_mk_btn(f"{'🔴 تعطيل' if enabled else '🟢 تفعيل'} زر البدء الجانبي",
+                 style="danger" if enabled else "success",
+                 callback_data="menu_button_toggle")],
+        [_mk_btn("🔄 تطبيق الآن", style="primary", callback_data="menu_button_apply")],
+        [_mk_btn("↩️ رجوع للوحة", callback_data="back_panel")],
+    ]
+    return text, InlineKeyboardMarkup(kb)
+
+
+# القائمة اللي تظهر للمستخدم العادي في زر القائمة الجانبي
+USER_MENU_COMMANDS = [
+    ("start", "بدء محادثة"),
+]
+
+# قائمة المالك (تظهر له هو فقط عبر نطاق خاص بشات المالك)
+OWNER_MENU_COMMANDS = [
+    ("start", "بدء محادثة / لوحة التحكم"),
+    ("info", "معلومات المستخدم"),
+    ("emoji_id", "آيدي إيموجي بريميوم"),
+    ("backup", "نسخة احتياطية"),
+    ("restore", "استعادة نسخة احتياطية"),
+    ("cancel", "إلغاء الأمر الحالي"),
+]
+
+
+async def apply_menu_button(ctx, enabled: bool | None = None) -> bool:
+    """
+    يثبّت زر القائمة الجانبي عند المستخدمين: قائمة أوامر فيها /start
+    وزر القائمة نفسه (MenuButtonCommands) — أو يرجّعه للوضع الافتراضي.
+    """
+    s = load_settings()
+    if enabled is None:
+        enabled = bool(s.get("menu_button_enabled", True))
+    try:
+        if enabled:
+            # /start — بدء محادثة: زر جانبي ثابت عند كل المستخدمين
+            await ctx.bot.set_my_commands(
+                [BotCommand(cmd, desc) for cmd, desc in USER_MENU_COMMANDS]
+            )
+            # قائمة المالك تظهر له وحده (نطاق خاص بشاته)
+            await ctx.bot.set_my_commands(
+                [BotCommand(cmd, desc) for cmd, desc in OWNER_MENU_COMMANDS],
+                scope=BotCommandScopeChat(chat_id=OWNER_ID),
+            )
+            await ctx.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+            logger.info("⌨️ تم تثبيت زر «بدء محادثة» الجانبي وقائمة الأوامر.")
+        else:
+            await ctx.bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+            logger.info("⌨️ تم إرجاع زر القائمة للوضع الافتراضي.")
+        return True
+    except TelegramError as e:
+        logger.error(f"تعذّر تطبيق زر القائمة الجانبي: {e}")
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════
 #  أدوات معالجة أمر ق
 # ═══════════════════════════════════════════════════════════════
 def utf16_len(s: str) -> int:
@@ -2567,20 +3911,17 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if user.id not in load_banned():
         await apply_receipt_emoji(ctx, user.id, update.message.message_id)
     if s.get("quick_reply_enabled"):
-        welcome_sent = await update.message.reply_text(
-            render_premium_emojis(s.get("quick_reply_msg", DEFAULT_QUICK_REPLY_MSG)),
-            parse_mode=ParseMode.HTML,
+        quick = await send_formatted(
+            ctx.bot, user.id, s.get("quick_reply_msg", DEFAULT_QUICK_REPLY_MSG),
+            link_preview_options=welcome_link_preview(s),
             **protect_kwargs(user.id),
         )
+        welcome_sent = quick[-1] if quick else None
     else:
-        welcome_text = s["welcome"].replace("{user_link}", user_mention(user)).replace("{owner_id}", str(OWNER_ID))
-        welcome_text = render_premium_emojis(welcome_text)
-        welcome_sent = await update.message.reply_text(
-            welcome_text,
-            reply_markup=welcome_keyboard(s["buttons"]),
-            parse_mode=ParseMode.HTML,
-            **protect_kwargs(user.id),
-        )
+        welcome_messages = await send_welcome(ctx, update, user, s)
+        welcome_sent = welcome_messages[-1] if welcome_messages else None
+    if welcome_sent is None:
+        return
     record_message(user.id, "user", welcome_sent.message_id, "welcome")
     # لو المالك مثبت رسالة عامة حالياً، يحصل المستخدم الجديد على نسخته
     # وتثبيتها تلقائياً مثل المستخدمين المسجلين قبل كده.
@@ -2722,13 +4063,13 @@ async def handle_user_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ai_text = ""
     if auto_item:
         try:
-            auto_sent = await ctx.bot.send_message(
-                chat_id=user.id,
-                text=render_premium_emojis(auto_item["reply"]),
-                parse_mode=ParseMode.HTML,
-                **protect_kwargs(user.id),
+            # 🔄 المحرك: الرد التلقائي يتكتب بأي تنسيق وما يُرفضش أبداً
+            auto_parts = await send_formatted(
+                ctx.bot, user.id, auto_item["reply"], **protect_kwargs(user.id),
             )
-            record_message(user.id, "user", auto_sent.message_id, "auto_reply")
+            auto_sent = auto_parts[-1] if auto_parts else None
+            if auto_sent is not None:
+                record_message(user.id, "user", auto_sent.message_id, "auto_reply")
         except TelegramError as e:
             logger.error(f"فشل إرسال الرد التلقائي: {e}")
     elif s.get("ai_enabled"):
@@ -2751,9 +4092,11 @@ async def handle_user_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     pass
     elif s.get("away_enabled"):
         # وضع الغياب — يعمل فقط لو مفيش رد تلقائي بالكلمة أو ذكاء اصطناعي
-        away_sent = await msg.reply_text(render_premium_emojis(s["away_msg"]), parse_mode=ParseMode.HTML,
-                                         **protect_kwargs(user.id))
-        record_message(user.id, "user", away_sent.message_id, "away_reply")
+        away_parts = await send_formatted(ctx.bot, user.id, s["away_msg"],
+                                          **protect_kwargs(user.id))
+        away_sent = away_parts[-1] if away_parts else None
+        if away_sent is not None:
+            record_message(user.id, "user", away_sent.message_id, "away_reply")
 
     # (تم إلغاء التفاعل التلقائي ⚡ بناءً على طلب المالك)
 
@@ -3677,8 +5020,13 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         try:
             if msg.text:
-                sent = await ctx.bot.send_message(chat_id=user_id, text=new_text,
-                                                   **protect_kwargs(user_id))
+                # 🔄 اكتب بحرية: Markdown / HTML / تنسيق تيليجرام — المحرك بيفهمه
+                sent_parts = await send_formatted(ctx.bot, user_id, new_text,
+                                                  **protect_kwargs(user_id))
+                sent = sent_parts[-1] if sent_parts else None
+                if sent is None:
+                    await msg.reply_text("⚠️ فشل الإرسال")
+                    return
             else:
                 # وسيط (صورة/فيديو/ملف..) بكابشن يبدأ بـ & → يتبعت بنفس الوسيط
                 # وكابشن جديد بدون علامة الـ & وبدون رد على رسالة بعينها
@@ -3954,10 +5302,14 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "edit_buttons":
         await query.edit_message_text(
-            "🔗 أرسل أزرار الترحيب، كل سطر بالشكل:\n"
+            "🔗 <b>أزرار رسالة البدء</b>\n\n"
+            "⌨️ <b>الطريقة الأسهل:</b> اضغط «محرر الكيبورد المتقدّم» بالأسفل — "
+            "تضيف/تحذف/تنقل/تبادل الأزرار وتفصل وتدمج الصفوف بضغطة، مع 4 ألوان "
+            "وإيموجي عادي أو بريميوم لكل زر.\n\n"
+            "📝 <b>أو بالكتابة:</b> أرسل الأزرار، كل سطر بالشكل:\n"
             "نص | رابط | اللون (اختياري)\n\n"
             "الألوان المدعومة:\n"
-            "🔵 primary\n🟢 success\n🔴 danger\n\n"
+            "⚪ default\n🔵 primary\n🟢 success\n🔴 danger\n\n"
             "لإضافة إيموجي بريميوم على الزر: استخدم /emoji_id علشان تجيب "
             "الكود وحط {ID} في أي مكان في نص الزر، هيظهر كأيقونة بجانب "
             "النص (إيموجي واحد بس لكل زر). لازم يكون عند صاحب البوت اشتراك "
@@ -3966,13 +5318,382 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "مثال:\n"
             "القناة الرسمية {5386419798677874707} | https://t.me/CHANNEL_USERNAME | primary\n\n"
             "أرسل /cancel للإلغاء.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [_mk_btn("⌨️ محرر الكيبورد المتقدّم", style="primary", callback_data="kb_editor")],
+                [_mk_btn("↩️ رجوع للوحة", callback_data="back_panel")],
+            ]),
         )
         return AWAIT_BUTTONS_TEXT
+
+    # ── ⌨️ محرر الكيبورد المتقدّم ────────────────────────────────
+    if data == "kb_editor" or data.startswith("kb_editor:"):
+        page = int(data.split(":")[1]) if ":" in data else 0
+        text, kb = keyboard_editor_view(page)
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data.startswith("kb_btn:"):
+        _, r, i = data.split(":")
+        text, kb = button_editor_view(int(r), int(i))
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data.startswith("kb_style_menu:"):
+        _, r, i = data.split(":")
+        text, kb = button_style_view(int(r), int(i))
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data.startswith("kb_style:"):
+        _, r, i, style = data.split(":")
+        result = kb_set_style(int(r), int(i), style)
+        await query.answer(result, show_alert=True)
+        text, kb = button_editor_view(int(r), int(i))
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data.startswith("kb_emoji_menu:"):
+        _, r, i = data.split(":")
+        text, kb = button_emoji_view(int(r), int(i))
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data.startswith("kb_emoji:"):
+        _, r, i, mode = data.split(":")
+        if mode == "normal":
+            result = kb_set_emoji_normal(int(r), int(i))
+            await query.answer(result, show_alert=True)
+            text, kb = button_editor_view(int(r), int(i))
+            await _kb_edit_screen(query, text, kb)
+            return ConversationHandler.END
+        ctx.user_data["kb_target"] = (int(r), int(i))
+        await _kb_edit_screen(
+            query,
+            "✨ <b>إيموجي بريميوم للزر</b>\n\n"
+            "ابعت الإيموجي البريميوم نفسه في الرسالة الجاية (البوت هياخد الآيدي "
+            "تلقائياً)، أو اكتب الآيدي بالأرقام.\n"
+            "👥 غير المشتركين في بريميوم هيشوفوا إيموجي عادي بدل منه.\n\n"
+            "اكتب /cancel للإلغاء.",
+            InlineKeyboardMarkup([
+                [_mk_btn("↩️ رجوع", callback_data=f"kb_emoji_menu:{r}:{i}")],
+            ]),
+        )
+        return AWAIT_BUTTON_EMOJI
+
+    if data.startswith("kb_move_menu:"):
+        _, r, i = data.split(":")
+        text, kb = button_move_view(int(r), int(i))
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data.startswith("kb_move:"):
+        _, r, i, direction = data.split(":")
+        result = kb_move_button(int(r), int(i), direction)
+        await query.answer(result, show_alert=True)
+        text, kb = keyboard_editor_view(_kb_page_of(int(r)))
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data.startswith("kb_swap_with:"):
+        _, r1, i1, r2, i2 = data.split(":")
+        result = kb_swap_buttons(int(r1), int(i1), int(r2), int(i2))
+        await query.answer(result, show_alert=True)
+        text, kb = keyboard_editor_view(_kb_page_of(int(r1)))
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data.startswith("kb_swap:"):
+        _, r, i = data.split(":")
+        text, kb = button_swap_pick_view(int(r), int(i))
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data.startswith("kb_del_btn:"):
+        _, r, i = data.split(":")
+        result = kb_delete_button(int(r), int(i))
+        await query.answer(result, show_alert=True)
+        text, kb = keyboard_editor_view(_kb_page_of(int(r)))
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data.startswith("kb_split_at:"):
+        _, r, i = data.split(":")
+        result = kb_split_row(int(r), int(i))
+        await query.answer(result, show_alert=True)
+        text, kb = keyboard_editor_view(_kb_page_of(int(r)))
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data.startswith("kb_split:"):
+        _, r = data.split(":")
+        result = kb_split_row(int(r))
+        await query.answer(result, show_alert=True)
+        text, kb = keyboard_editor_view(_kb_page_of(int(r)))
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data.startswith("kb_merge:"):
+        _, r = data.split(":")
+        result = kb_merge_rows(int(r))
+        await query.answer(result, show_alert=True)
+        text, kb = keyboard_editor_view(_kb_page_of(int(r)))
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "kb_add_row":
+        ctx.user_data["kb_target_row"] = len(button_rows())
+        await _kb_edit_screen(
+            query,
+            "➕ <b>زر في صف جديد</b>\n\n"
+            "اكتب الزر بالشكل:\n<code>النص | الرابط | الستايل</code>\n"
+            "مثال: <code>قناتي | https://t.me/x | primary</code>\n\n"
+            "الألوان: ⚪ default · 🔵 primary · 🟢 success · 🔴 danger\n"
+            "اكتب /cancel للإلغاء.",
+            InlineKeyboardMarkup([[_mk_btn("↩️ رجوع", callback_data="kb_editor:0")]]),
+        )
+        return AWAIT_NEW_BUTTON
+
+    if data.startswith("kb_add_btn:"):
+        _, r = data.split(":")
+        ctx.user_data["kb_target_row"] = int(r)
+        await _kb_edit_screen(
+            query,
+            f"➕ <b>زر جديد في الصف {int(r) + 1}</b>\n\n"
+            "اكتب الزر بالشكل:\n<code>النص | الرابط | الستايل</code>\n"
+            "مثال: <code>قناتي | https://t.me/x | primary</code>\n\n"
+            "الألوان: ⚪ default · 🔵 primary · 🟢 success · 🔴 danger\n"
+            "✨ وللإيموجي البريميوم حط <code>{ID}</code> في النص.\n"
+            "اكتب /cancel للإلغاء.",
+            InlineKeyboardMarkup([
+                [_mk_btn("↩️ رجوع", callback_data=f"kb_editor:{_kb_page_of(int(r))}")],
+            ]),
+        )
+        return AWAIT_NEW_BUTTON
+
+    if data.startswith("kb_edit_text:"):
+        _, r, i = data.split(":")
+        ctx.user_data["kb_target"] = (int(r), int(i))
+        button = _get_button(int(r), int(i)) or {}
+        await _kb_edit_screen(
+            query,
+            "✏️ <b>تغيير نص الزر</b>\n\n"
+            f"الحالي: <code>{html.escape(str(button.get('text') or ''))}</code>\n\n"
+            "اكتب النص الجديد (حتى 64 حرفاً).\n"
+            "✨ لو بعتّ إيموجي بريميوم في الرسالة هيتحوّل تلقائياً لصيغة "
+            "<code>{ID}</code>.\n"
+            "اكتب /cancel للإلغاء.",
+            InlineKeyboardMarkup([[_mk_btn("↩️ رجوع", callback_data=f"kb_btn:{r}:{i}")]]),
+        )
+        return AWAIT_BUTTON_TEXT
+
+    if data.startswith("kb_edit_url:"):
+        _, r, i = data.split(":")
+        ctx.user_data["kb_target"] = (int(r), int(i))
+        button = _get_button(int(r), int(i)) or {}
+        await _kb_edit_screen(
+            query,
+            "🔗 <b>تغيير رابط الزر</b>\n\n"
+            f"الحالي: <code>{html.escape(str(button.get('url') or ''))}</code>\n\n"
+            "اكتب الرابط الجديد (لازم يبدأ بـ http أو https أو tg).\n"
+            "اكتب /cancel للإلغاء.",
+            InlineKeyboardMarkup([[_mk_btn("↩️ رجوع", callback_data=f"kb_btn:{r}:{i}")]]),
+        )
+        return AWAIT_BUTTON_URL
+
+    if data == "kb_preview":
+        s = load_settings()
+        await query.message.reply_text(
+            "👁️ <b>معاينة رسالة البدء</b> — زي ما المستخدم هيشوفها بالظبط "
+            "(النص + التنسيق + الأزرار + معاينة الروابط):",
+            parse_mode=ParseMode.HTML,
+        )
+        await send_formatted(
+            ctx.bot, OWNER_ID,
+            _render_template(s.get("welcome") or DEFAULT_WELCOME, {
+                "user_link": user_mention(update.effective_user),
+                "owner_id": str(OWNER_ID),
+                "name": user_name(update.effective_user),
+            }),
+            reply_markup=welcome_keyboard(s.get("buttons")),
+            link_preview_options=welcome_link_preview(s),
+        )
+        return ConversationHandler.END
+
+    # ── 📝 رسالة البدء المحسّنة: ميديا + كابشن + معاينة روابط ─────
+    if data == "start_msg_menu":
+        text, kb = start_message_menu_view()
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "start_media_upload":
+        await _kb_edit_screen(
+            query,
+            "📎 <b>إرسال ميديا رسالة البدء</b>\n\n"
+            "ابعت دلوقتي واحد من:\n"
+            "🃏 ملصق · 🖼 صورة · 🎬 فيديو · 🎞 GIF\n\n"
+            "💡 ممكن تبعت الميديا ومعها كابشن في نفس الرسالة والبوت يحفظه "
+            "تلقائياً (الملصق ما بيقبلش كابشن، فهيتبعت مع رسالة النص).\n"
+            "💡 الكابشن بيتكتب بأي تنسيق: من تيليجرام مباشرة أو Markdown أو HTML.\n\n"
+            "اكتب /cancel للإلغاء.",
+            InlineKeyboardMarkup([[_mk_btn("↩️ رجوع", callback_data="start_msg_menu")]]),
+        )
+        return AWAIT_WELCOME_MEDIA
+
+    if data == "welcome_caption_edit":
+        await _kb_edit_screen(
+            query,
+            "✏️ <b>كابشن ميديا رسالة البدء</b>\n\n"
+            "اكتب الكابشن الجديد (حتى 1024 حرفاً) بأي تنسيق تحبه:\n"
+            "• من تيليجرام مباشرة (اختار النص → تنسيق)\n"
+            "• Markdown: <code>**عريض** __تحت__ ~شطب~ ||مخفي|| `كود`</code>\n"
+            "• HTML: <code>&lt;b&gt; &lt;i&gt; &lt;u&gt; &lt;s&gt; &lt;tg-spoiler&gt; "
+            "&lt;code&gt; &lt;pre&gt; &lt;blockquote&gt; &lt;a&gt;</code>\n"
+            "• إيموجي بريميوم: <code>{ID}</code>\n\n"
+            "اكتب /cancel للإلغاء.",
+            InlineKeyboardMarkup([[_mk_btn("↩️ رجوع", callback_data="start_msg_menu")]]),
+        )
+        return AWAIT_WELCOME_CAPTION
+
+    if data == "welcome_media_toggle":
+        s = load_settings()
+        media = dict(s.get("welcome_media") or DEFAULT_WELCOME_MEDIA)
+        if not media.get("file_id"):
+            await query.answer("⚠️ ابعت ميديا الأول من «📎 إرسال ميديا».", show_alert=True)
+            return ConversationHandler.END
+        media["enabled"] = not bool(media.get("enabled"))
+        s["welcome_media"] = media
+        save_settings(s)
+        await query.answer(f"{'🟢 مفعّلة' if media['enabled'] else '🔴 معطّلة'}",
+                           show_alert=True)
+        text, kb = start_message_menu_view()
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "welcome_media_clear":
+        s = load_settings()
+        s["welcome_media"] = dict(DEFAULT_WELCOME_MEDIA)
+        save_settings(s)
+        await query.answer("🗑 تم حذف الميديا والكابشن.", show_alert=True)
+        text, kb = start_message_menu_view()
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "preview_menu":
+        text, kb = preview_menu_view()
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "preview_off":
+        _save_welcome_preview(disabled=True)
+        await query.answer("🚫 تم إخفاء معاينة الروابط (ضجيج أقل).", show_alert=True)
+        text, kb = preview_menu_view()
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "preview_on":
+        _save_welcome_preview(disabled=False)
+        await query.answer("👁️ تم إظهار معاينة الروابط.", show_alert=True)
+        text, kb = preview_menu_view()
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "preview_url_edit":
+        await _kb_edit_screen(
+            query,
+            "🔗 <b>رابط المعاينة المخصص</b>\n\n"
+            "اكتب الرابط (لازم يبدأ بـ <code>https://</code>).\n"
+            "أي رسالة بدء هتظهر معاينة الموقع ده حتى لو مفيش روابط في النص.\n\n"
+            "اكتب /cancel للإلغاء.",
+            InlineKeyboardMarkup([[_mk_btn("↩️ رجوع", callback_data="preview_menu")]]),
+        )
+        return AWAIT_PREVIEW_URL
+
+    if data == "preview_url_clear":
+        _save_welcome_preview(url="")
+        await query.answer("🗑 تم حذف الرابط المخصص.", show_alert=True)
+        text, kb = preview_menu_view()
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "preview_small":
+        current = (load_settings().get("welcome_preview") or {}).get("small")
+        _save_welcome_preview(small=not current, large=False)
+        text, kb = preview_menu_view()
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "preview_large":
+        current = (load_settings().get("welcome_preview") or {}).get("large")
+        _save_welcome_preview(large=not current, small=False)
+        text, kb = preview_menu_view()
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "preview_above":
+        _save_welcome_preview(above=True)
+        text, kb = preview_menu_view()
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "preview_below":
+        _save_welcome_preview(above=False)
+        text, kb = preview_menu_view()
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    # ── ⌨️ زر «بدء محادثة» الجانبي الثابت ────────────────────────
+    if data == "menu_button_menu":
+        text, kb = menu_button_view()
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "menu_button_toggle":
+        s = load_settings()
+        s["menu_button_enabled"] = not bool(s.get("menu_button_enabled", True))
+        save_settings(s)
+        await apply_menu_button(ctx, s["menu_button_enabled"])
+        await query.answer(
+            "🟢 مفعّل" if s["menu_button_enabled"] else "🔴 معطّل", show_alert=True
+        )
+        text, kb = menu_button_view()
+        await _kb_edit_screen(query, text, kb)
+        return ConversationHandler.END
+
+    if data == "menu_button_apply":
+        ok = await apply_menu_button(ctx)
+        await query.answer(
+            "✅ تم تطبيق زر القائمة عند كل المستخدمين" if ok
+            else "⚠️ تيليجرام رفض الطلب — حاول بعد شوية",
+            show_alert=True,
+        )
+        return ConversationHandler.END
+
+    # ── 🎯 تشغيل/تعطيل إيموجي الاستلام بضغطة واحدة ───────────────
+    if data == "receipt_toggle_direct":
+        s = load_settings()
+        s["receipt_emoji_enabled"] = not bool(s.get("receipt_emoji_enabled", True))
+        save_settings(s)
+        on = s["receipt_emoji_enabled"]
+        await query.answer(
+            f"🎯 إيموجي الاستلام: {'🟢 مفعّل' if on else '🔴 معطّل'}", show_alert=True
+        )
+        await query.message.reply_text(
+            f"🎯 <b>إيموجي الاستلام عند وصول الرسالة</b>\n\n"
+            f"الحالة: {'🟢 مفعّل' if on else '🔴 معطّل'}\n"
+            f"الإيموجي: <code>{html.escape(str(s.get('receipt_emoji', DEFAULT_RECEIPT_EMOJI)))}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=owner_panel_keyboard(),
+        )
+        return ConversationHandler.END
 
 
     if data == "view_settings":
         s = load_settings()
-        btns = "\n".join(f'{b["text"]} | {b["url"]}' for b in s["buttons"])
+        btns = "\n".join(
+            " · ".join(f'{b["text"]} | {b["url"] or "⚠️ بدون رابط"}' for b in row)
+            for row in normalize_button_rows(s.get("buttons") or DEFAULT_BUTTONS)
+        ) or "لا توجد أزرار"
         away_status  = "🟢 مفعّل" if s.get("away_enabled") else "🔴 معطّل"
         auto_status  = "🟢 مفعّل" if s.get("autoresponder_enabled") else "🔴 معطّل"
         quick_status = "🟢 مفعّل" if s.get("quick_reply_enabled") else "🔴 معطّل"
@@ -4248,6 +5969,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
              "warn_max": DEFAULT_WARN_MAX,
              "warn_message": DEFAULT_WARN_MESSAGE,
              "warn_auto_ban": True,
+             "welcome_media": dict(DEFAULT_WELCOME_MEDIA),
+             "welcome_preview": dict(DEFAULT_WELCOME_PREVIEW),
+             "menu_button_enabled": True,
              # إعادة الإعدادات لا تلغي النسخة العامة أو زر حذفها.
              "global_pin": _global_pin_data(),
              }
@@ -4686,8 +6410,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def recv_welcome_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return ConversationHandler.END
-    s = load_settings(); s["welcome"] = update.message.text; save_settings(s)
-    await update.message.reply_text("✅ تم تحديث رسالة الترحيب.", reply_markup=owner_panel_keyboard())
+    s = load_settings(); s["welcome"] = captured_text(update.message); save_settings(s)
+    await update.message.reply_text("✅ تم تحديث رسالة الترحيب (بكل التنسيق).",
+                                    reply_markup=owner_panel_keyboard())
     return ConversationHandler.END
 
 async def recv_buttons_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -4699,17 +6424,196 @@ async def recv_buttons_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if "|" in line:
             parts = [p.strip() for p in line.split("|")]
             btn = {"text": parts[0], "url": parts[1]}
-            # التأكد من وجود لون صحيح
-            if len(parts) > 2 and parts[2].lower() in ["primary", "success", "danger"]:
+            # التأكد من وجود لون صحيح (⚪ default أُضيف للمحرر المتقدّم)
+            if len(parts) > 2 and parts[2].lower() in VALID_BUTTON_STYLES:
                 btn["style"] = parts[2].lower()
             buttons.append(btn)
             
     if not buttons:
         await update.message.reply_text("⚠️ الصيغة غير صحيحة.\nمثال: نص | رابط | primary\nأو /cancel للإلغاء.")
         return AWAIT_BUTTONS_TEXT
-        
-    s = load_settings(); s["buttons"] = buttons; save_settings(s)
-    await update.message.reply_text("✅ تم تحديث أزرار الترحيب بالألوان.", reply_markup=owner_panel_keyboard())
+
+    # كل سطر = زر، والأزرار بتترتب في صفوف (زرّين في الصف) زي الشكل المعتاد.
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    save_button_rows(rows)
+    await update.message.reply_text(
+        "✅ تم تحديث أزرار الترحيب بالألوان.\n"
+        "💡 للتحكم الكامل في الصفوف (نقل/مبادلة/فصل/دمج) استخدم "
+        "⌨️ محرر الكيبورد المتقدّم من اللوحة.",
+        reply_markup=owner_panel_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def _kb_reply_with_editor(update: Update, ctx: ContextTypes.DEFAULT_TYPE, note: str,
+                                page: int = 0):
+    """يرد على المالك بنتيجة العملية + شاشة المحرر المحدّثة."""
+    text, kb = keyboard_editor_view(page)
+    await update.message.reply_text(f"{note}\n\n{text}", reply_markup=kb,
+                                    parse_mode=ParseMode.HTML)
+    ctx.user_data.pop("kb_target", None)
+    ctx.user_data.pop("kb_target_row", None)
+    return ConversationHandler.END
+
+
+async def recv_button_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """✏️ حفظ نص زر بعد تعديله (مع تحويل الإيموجي البريميوم لصيغة {ID})."""
+    if update.effective_user.id != OWNER_ID:
+        return ConversationHandler.END
+    target = ctx.user_data.get("kb_target")
+    if not target:
+        return ConversationHandler.END
+    r, i = target
+    rows = button_rows()
+    if not (0 <= r < len(rows) and 0 <= i < len(rows[r])):
+        return await _kb_reply_with_editor(update, ctx, "⚠️ الزر مش موجود anymore.", _kb_page_of(r))
+    new_text = captured_button_text(update.message)[:64]
+    if not new_text:
+        return await _kb_reply_with_editor(update, ctx, "⚠️ النص فاضي — ما اتغيّرش حاجة.",
+                                           _kb_page_of(r))
+    rows[r][i]["text"] = new_text
+    save_button_rows(rows)
+    return await _kb_reply_with_editor(update, ctx, f"✅ تم تحديث نص الزر إلى «{new_text}».",
+                                       _kb_page_of(r))
+
+
+async def recv_button_url(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """🔗 حفظ رابط زر بعد تعديله."""
+    if update.effective_user.id != OWNER_ID:
+        return ConversationHandler.END
+    target = ctx.user_data.get("kb_target")
+    if not target:
+        return ConversationHandler.END
+    r, i = target
+    rows = button_rows()
+    if not (0 <= r < len(rows) and 0 <= i < len(rows[r])):
+        return await _kb_reply_with_editor(update, ctx, "⚠️ الزر مش موجود.", _kb_page_of(r))
+    url = (update.message.text or "").strip()
+    if not re.match(r"^(https?://|tg://)", url):
+        return await _kb_reply_with_editor(
+            update, ctx,
+            "⚠️ الرابط لازم يبدأ بـ <code>http://</code> أو <code>https://</code> "
+            "أو <code>tg://</code>.", _kb_page_of(r))
+    rows[r][i]["url"] = url
+    save_button_rows(rows)
+    return await _kb_reply_with_editor(update, ctx, f"✅ تم تحديث رابط الزر إلى {url}.",
+                                       _kb_page_of(r))
+
+
+async def recv_button_emoji(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """✨ ربط إيموجي بريميوم بزر: من الإيموجي نفسه أو من الآيدي المكتوب."""
+    if update.effective_user.id != OWNER_ID:
+        return ConversationHandler.END
+    target = ctx.user_data.get("kb_target")
+    if not target:
+        return ConversationHandler.END
+    r, i = target
+    msg = update.message
+    emoji_id = ""
+    for entity in (msg.entities or []):
+        if entity.type == MessageEntity.CUSTOM_EMOJI and entity.custom_emoji_id:
+            emoji_id = str(entity.custom_emoji_id)
+            break
+    if not emoji_id:
+        typed = (msg.text or "").strip()
+        if typed in ("عادي", "عادى", "normal"):
+            result = kb_set_emoji_normal(r, i)
+            return await _kb_reply_with_editor(update, ctx, result, _kb_page_of(r))
+        digits = re.sub(r"\D", "", typed)
+        if digits and digits == typed:
+            emoji_id = digits
+    if not emoji_id:
+        return await _kb_reply_with_editor(
+            update, ctx,
+            "⚠️ ما عرفتش آخد إيموجي بريميوم من الرسالة.\n"
+            "ابعت الإيموجي البريميوم نفسه، أو اكتب الآيدي بالأرقام "
+            "(تجيبه بأمر <code>/emoji_id</code>).", _kb_page_of(r))
+    result = kb_set_emoji_premium(r, i, emoji_id)
+    return await _kb_reply_with_editor(update, ctx, result, _kb_page_of(r))
+
+
+async def recv_new_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """➕ إضافة زر جديد لصف (موجود أو جديد) من سطر «النص | الرابط | الستايل»."""
+    if update.effective_user.id != OWNER_ID:
+        return ConversationHandler.END
+    row_index = int(ctx.user_data.get("kb_target_row") or 0)
+    result = kb_add_button(row_index, captured_button_text(update.message))
+    return await _kb_reply_with_editor(update, ctx, result, _kb_page_of(row_index))
+
+
+async def recv_welcome_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """📎 حفظ ميديا رسالة البدء: ملصق/صورة/فيديو/GIF (+ الكابشن لو موجود)."""
+    if update.effective_user.id != OWNER_ID:
+        return ConversationHandler.END
+    msg = update.message
+    kind = file_id = None
+    if getattr(msg, "photo", None):
+        kind, file_id = "photo", msg.photo[-1].file_id
+    elif getattr(msg, "animation", None):
+        kind, file_id = "animation", msg.animation.file_id
+    elif getattr(msg, "video", None):
+        kind, file_id = "video", msg.video.file_id
+    elif getattr(msg, "sticker", None):
+        kind, file_id = "sticker", msg.sticker.file_id
+    if not file_id:
+        await msg.reply_text(
+            "⚠️ المطلوب ميديا: 🖼 صورة، 🎬 فيديو، 🎞 GIF أو 🃏 ملصق.\n"
+            "اكتب /cancel للإلغاء."
+        )
+        return AWAIT_WELCOME_MEDIA
+    caption = captured_text(msg)[:TG_CAPTION_LIMIT]
+    s = load_settings()
+    s["welcome_media"] = {"enabled": True, "kind": kind, "file_id": file_id,
+                          "caption": caption}
+    save_settings(s)
+    note = ""
+    if kind == "sticker" and caption.strip():
+        note = ("\n💡 الملصقات ما بتقبلش كابشن في تيليجرام — الكابشن اتحفظ "
+                "وهيتبعت فوق رسالة النص والأزرار.")
+    text, kb = start_message_menu_view()
+    await msg.reply_text(
+        f"✅ تم حفظ الميديا ({WELCOME_MEDIA_LABELS[kind]}) وتفعيلها.{note}\n\n{text}",
+        reply_markup=kb, parse_mode=ParseMode.HTML,
+    )
+    return ConversationHandler.END
+
+
+async def recv_welcome_caption(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """✏️ حفظ كابشن الميديا (بأي تنسيق — المحرك بيفهمه)."""
+    if update.effective_user.id != OWNER_ID:
+        return ConversationHandler.END
+    msg = update.message
+    caption = captured_text(msg)[:TG_CAPTION_LIMIT]
+    s = load_settings()
+    media = dict(s.get("welcome_media") or DEFAULT_WELCOME_MEDIA)
+    media["caption"] = caption
+    media["enabled"] = bool(media.get("file_id"))
+    s["welcome_media"] = media
+    save_settings(s)
+    text, kb = start_message_menu_view()
+    hint = "" if media.get("file_id") else "\n⚠️ لسه ما فيش ميديا — ابعت ميديا الأول."
+    await msg.reply_text(f"✅ تم حفظ الكابشن.{hint}\n\n{text}",
+                         reply_markup=kb, parse_mode=ParseMode.HTML)
+    return ConversationHandler.END
+
+
+async def recv_preview_url(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """🔗 حفظ رابط المعاينة المخصص لرسالة البدء."""
+    if update.effective_user.id != OWNER_ID:
+        return ConversationHandler.END
+    msg = update.message
+    url = (msg.text or "").strip()
+    if not re.match(r"^https?://", url):
+        text, kb = preview_menu_view()
+        await msg.reply_text(
+            "⚠️ رابط المعاينة لازم يبدأ بـ <code>http://</code> أو <code>https://</code>.\n\n"
+            + text, reply_markup=kb, parse_mode=ParseMode.HTML,
+        )
+        return AWAIT_PREVIEW_URL
+    _save_welcome_preview(url=url, disabled=False)
+    text, kb = preview_menu_view()
+    await msg.reply_text(f"✅ تم تعيين رابط المعاينة المخصص: {url}\n\n{text}",
+                         reply_markup=kb, parse_mode=ParseMode.HTML)
     return ConversationHandler.END
 
 
@@ -4741,14 +6645,16 @@ async def recv_broadcast_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def recv_away_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return ConversationHandler.END
-    s = load_settings(); s["away_msg"] = update.message.text; save_settings(s)
-    await update.message.reply_text("✅ تم تحديث رسالة الغياب.", reply_markup=owner_panel_keyboard())
+    s = load_settings(); s["away_msg"] = captured_text(update.message); save_settings(s)
+    await update.message.reply_text("✅ تم تحديث رسالة الغياب (بكل التنسيق).",
+                                    reply_markup=owner_panel_keyboard())
     return ConversationHandler.END
 
 async def recv_auto_keyword_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return ConversationHandler.END
-    text = update.message.text.strip()
+    # 🔄 captured_text يحافظ على تنسيق تيليجرام الأصلي داخل الرد
+    text = captured_text(update.message).strip()
     if "|" not in text:
         await update.message.reply_text(
             "⚠️ الصيغة غير صحيحة.\nمثال: السعر | 🔥 السعر يبدأ من 50$\n"
@@ -4756,7 +6662,7 @@ async def recv_auto_keyword_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return AWAIT_AUTO_KEYWORD_ADD
     keyword, reply = text.split("|", 1)
-    keyword, reply = keyword.strip(), reply.strip()
+    keyword, reply = strip_html_tags(keyword).strip(), reply.strip()
     if not keyword or not reply:
         await update.message.reply_text(
             "⚠️ لازم تكتب كلمة ورد فعلي.\nمثال: السعر | 🔥 السعر يبدأ من 50$\n"
@@ -4822,8 +6728,9 @@ async def recv_ban_reason(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def recv_quick_reply_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return ConversationHandler.END
-    s = load_settings(); s["quick_reply_msg"] = update.message.text; save_settings(s)
-    await update.message.reply_text("✅ تم تحديث نص الرد السريع.", reply_markup=owner_panel_keyboard())
+    s = load_settings(); s["quick_reply_msg"] = captured_text(update.message); save_settings(s)
+    await update.message.reply_text("✅ تم تحديث نص الرد السريع (بكل التنسيق).",
+                                    reply_markup=owner_panel_keyboard())
     return ConversationHandler.END
 
 
@@ -4903,7 +6810,7 @@ async def recv_warn_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """✏️ حفظ شكل رسالة الإنذار بعد معاينتها والتأكد من صحة التنسيق."""
     if update.effective_user.id != OWNER_ID:
         return ConversationHandler.END
-    new_text = update.message.text or ""
+    new_text = captured_text(update.message)
     if not new_text.strip():
         await update.message.reply_text("⚠️ أرسل نص رسالة الإنذار، أو /cancel للإلغاء.")
         return AWAIT_WARN_TEXT
@@ -5894,6 +7801,12 @@ async def on_startup(app: Application):
         except (TypeError, ValueError):
             continue
 
+    # ⌨️ تثبيت زر «بدء محادثة» الجانبي وقائمة الأوامر عند كل المستخدمين
+    try:
+        await apply_menu_button(app)
+    except Exception as e:                    # ما نعطّلش الإقلاع بسبب زر القائمة
+        logger.error(f"تعذّر تثبيت زر القائمة الجانبي عند الإقلاع: {e}")
+
     # إشعار المالك أن البوت اشتغل — بيتبعت تلقائياً كل مرة يعمل فيها deploy
     try:
         await app.bot.send_message(OWNER_ID, "✅ البوت يعمل الآن 🚀")
@@ -5942,6 +7855,15 @@ def build_app():
             AWAIT_WARN_REASON:      [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_warn_reason)],
             AWAIT_WARN_MAX:         [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_warn_max)],
             AWAIT_WARN_TEXT:        [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_warn_text)],
+            # ⌨️ محرر الكيبورد المتقدّم
+            AWAIT_BUTTON_TEXT:      [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_button_text)],
+            AWAIT_BUTTON_URL:       [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_button_url)],
+            AWAIT_BUTTON_EMOJI:     [MessageHandler(~filters.COMMAND & filters.User(OWNER_ID), recv_button_emoji)],
+            AWAIT_NEW_BUTTON:       [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_new_button)],
+            # 📝 رسالة البدء المحسّنة (ميديا + كابشن + معاينة روابط)
+            AWAIT_WELCOME_MEDIA:    [MessageHandler(~filters.COMMAND & filters.User(OWNER_ID), recv_welcome_media)],
+            AWAIT_WELCOME_CAPTION:  [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_welcome_caption)],
+            AWAIT_PREVIEW_URL:      [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(OWNER_ID), recv_preview_url)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_chat=True, per_user=True, per_message=False,
