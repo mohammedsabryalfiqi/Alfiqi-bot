@@ -195,6 +195,21 @@ async def main():
     check_true("ميديا معطّلة = نص فقط",
                not [m for m in bot.log if m["type"] == "send_photo"], str([m["type"] for m in bot.log]))
 
+    # حماية المحتوى بتتطبق على رسالة البدء بالميديا (وبردّ المالك)
+    reset_state()
+    bot = fresh_bot()
+    set_welcome("أهلاً")
+    media_setting("photo", "photo-id", "كابشن")
+    s = mod.load_settings(); s["protect_content_enabled"] = True; mod.save_settings(s)
+    await mod.cmd_start(make_update(FakeMessage(text="/start", chat_id=USER,
+                                                user=FakeUser(USER))), ctx_with(bot))
+    photo_call = [m for m in bot.log if m["type"] == "send_photo" and m["chat_id"] == USER]
+    check_true("حماية المحتوى مفعّلة على ميديا البدء",
+               bool(photo_call) and photo_call[0]["kw"].get("protect_content") is True,
+               str(photo_call[0]["kw"] if photo_call else bot.log))
+    check_true("ما فيش إعدادات وهمية (disable_notification) بتتبعت",
+               "disable_notification" not in photo_call[0]["kw"], str(photo_call[0]["kw"]))
+
     # ══ 3) 🔗 معاينة الروابط ══
     reset_state()
     bot = fresh_bot()

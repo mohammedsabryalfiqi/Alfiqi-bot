@@ -2737,10 +2737,8 @@ async def send_welcome(ctx, update, user, s: dict | None = None) -> list:
     variables = {"user_link": user_mention(user), "owner_id": str(OWNER_ID), "name": user_name(user)}
     preview = welcome_link_preview(s)
     buttons = welcome_keyboard(s.get("buttons"))
-    notify_kw = {
-        "protect_content": bool(s.get("content_protection")),
-        "disable_notification": bool(s.get("silent")),
-    }
+    # حماية المحتوى تُحسب بنفس الطريقة في كل البوت (وتتجاوز المالك تلقائياً)
+    notify_kw = protect_kwargs(uid)
     sent: list = []
 
     media = s.get("welcome_media") or {}
