@@ -1,0 +1,20 @@
+# بيئة التشغيل والملفات المولّدة — لا تدخل المستودع
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# ملفات حالة البوت (تتولد أثناء التشغيل والتجارب المحلية)
+settings.json
+banned.json
+users.json
+msg_map.json
+reply_map.json
+user_state.json
+user_stats.json
+message_records.json
+audit_log.json
+old_stats.json
+backup_*.json
+
+.env
