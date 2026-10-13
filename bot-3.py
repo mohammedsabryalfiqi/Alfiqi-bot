@@ -1433,22 +1433,32 @@ def user_messages_view(uid: int, page: int = 0):
         f"صفحة {page + 1}/{total_pages} · 🧑‍💻 من/إلى العضو · 👮 في شاتك",
         "",
     ]
+    # نبني الرسالة مدخل بمدخل ونقف عند حد تيليجرام — القص في نص السطر
+    # ممكن يقطع وسم HTML فيخلي الرسالة مرفوضة، فبنُسقط المدخل كامل بدل كده.
+    budget = TG_TEXT_LIMIT - 200
+    dropped = 0
     for offset, item in enumerate(shown):
         kind_label = MESSAGE_KIND_LABELS.get(
             str(item.get("kind") or ""), str(item.get("kind") or "رسالة")
         )
         side_icon = "🧑‍💻" if item.get("side") == "user" else "👮"
         preview = str(item.get("preview") or "").strip()
-        lines.append(
+        entry = [
             f"<b>{start + offset + 1}.</b> {side_icon} {html.escape(kind_label)}"
             f" · {display_time(item.get('created_at', 0))}"
-        )
+        ]
         if preview:
-            lines.append(f"    <code>{html.escape(preview[:140])}</code>")
+            entry.append(f"    <code>{html.escape(preview[:140])}</code>")
         elif str(item.get("kind") or "") in PREVIEWLESS_KINDS:
-            lines.append("    <i>(إجراء/بطاقة بدون نص)</i>")
+            entry.append("    <i>(إجراء/بطاقة بدون نص)</i>")
         else:
-            lines.append("    <i>(رسالة قديمة مسجّلة قبل تفعيل المعاينة — بدون نص)</i>")
+            entry.append("    <i>(رسالة قديمة مسجّلة قبل تفعيل المعاينة — بدون نص)</i>")
+        if len("\n".join(lines + entry)) > budget:
+            dropped += 1
+            continue
+        lines.extend(entry)
+    if dropped:
+        lines.append(f"\n<i>… {dropped} رسالة من الصفحة دي ما عرضتش لضيق المساحة.</i>")
     if not items:
         lines.append("لا توجد رسائل مسجّلة لهذا العضو حتى الآن.")
 
@@ -1465,10 +1475,8 @@ def user_messages_view(uid: int, page: int = 0):
         _mk_btn("🔙 اللوحة", callback_data="back_panel"),
     ])
 
-    text = "\n".join(lines)
-    if len(text) > 4000:
-        text = text[:4000] + "\n…"
-    return text, InlineKeyboardMarkup(kb)
+    # النص اتبنى جوه الميزانية أصلاً — ما فيش قص في نص وسم HTML
+    return "\n".join(lines), InlineKeyboardMarkup(kb)
 
 
 

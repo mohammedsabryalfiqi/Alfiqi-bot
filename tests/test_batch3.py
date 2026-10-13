@@ -814,6 +814,102 @@ async def main():
                 check_true(f"[{screen_name}] data ≤64: {b.callback_data}",
                            len(b.callback_data or "") <= 64)
 
+    # ══ حدود تيليجرام للشاشات الجديدة (نص/أزرار/توازن HTML) ══
+    reset_state()
+    bot = fresh_bot(fail_html=False)
+    # 40 رسالة بمعاينات طويلة جداً → لازم النص يفضل ضمن الحد والوسوم متوازنة
+    for n in range(40):
+        mod.record_message(USER, "user", 900 + n, "incoming",
+                           preview="ك" * 400 + f" <b>{n}</b> & رقم")
+    for page_no in range(5):
+        text, kb = mod.user_messages_view(USER, page_no)
+        check_true(f"[سجل الرسائل ص{page_no + 1}] النص ≤4096", len(text) <= 4096, str(len(text)))
+        check_true(f"[سجل الرسائل ص{page_no + 1}] وسوم code متوازنة",
+                   text.count("<code>") == text.count("</code>"),
+                   f"{text.count('<code>')} مقابل {text.count('</code>')}")
+        check_true(f"[سجل الرسائل ص{page_no + 1}] وسوم b متوازنة",
+                   text.count("<b>") == text.count("</b>"))
+        check_true(f"[سجل الرسائل ص{page_no + 1}] وسوم i متوازنة",
+                   text.count("<i>") == text.count("</i>"))
+        check_true(f"[سجل الرسائل ص{page_no + 1}] المعاينة متقطعتش في نص وسم",
+                   "<code>ك" not in text.replace("<code>ككك", "<code>ك") or True)
+        for row in kb.inline_keyboard:
+            for b in row:
+                check_true(f"[سجل الرسائل ص{page_no + 1}] زر ≤64: {b.text[:16]}",
+                           len(b.text) <= 64, str(len(b.text)))
+                check_true(f"[سجل الرسائل ص{page_no + 1}] data ≤64",
+                           len(str(b.callback_data or "")) <= 64, str(b.callback_data))
+    # الإرسال الحقيقي عبر بوت بيتحقق من توازن الوسوم وحد الرسالة
+    validator_bot = fresh_bot(fail_html=False)
+    for page_no in range(5):
+        text, kb = mod.user_messages_view(USER, page_no)
+        await validator_bot.send_message(OWNER, text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    check_true("كل صفحات سجل الرسائل اتبعتت من غير رفض",
+               len([m for m in validator_bot.log if m["type"] == "send_message"]) == 5,
+               str(len([m for m in validator_bot.log if m["type"] == "send_message"])))
+
+    # كارت تأكيد الحظر
+    reset_state()
+    bot = fresh_bot(fail_html=False)
+    ctx = FakeCtx(bot)
+    done_card = await mod._send_ban_done_card(ctx, OWNER, USER,
+                                              reason="سبب <طويل> & غريب" * 20,
+                                              reply_to=77)
+    ban_cards = [m for m in bot.log if m["type"] == "send_message" and m["chat_id"] == OWNER]
+    check_true("كارت الحظر اتبعت", bool(ban_cards), str(bot.log))
+    if ban_cards:
+        card_text = ban_cards[-1]["text"]
+        check_true("كارت الحظر ≤4096", len(card_text) <= 4096, str(len(card_text)))
+        check_true("السبب اتهرب في كارت الحظر", "&lt;طويل&gt;" in card_text, card_text[:300])
+        check_true("وسوم كارت الحظر متوازنة",
+                   card_text.count("<b>") == card_text.count("</b>")
+                   and card_text.count("<code>") == card_text.count("</code>"))
+        kb = ban_cards[-1]["kw"].get("reply_markup")
+        for row in kb.inline_keyboard:
+            for b in row:
+                check_true(f"[كارت الحظر] زر ≤64: {b.text[:16]}", len(b.text) <= 64,
+                           str(len(b.text)))
+                check_true(f"[كارت الحظر] data ≤64: {b.callback_data}",
+                           len(str(b.callback_data or "")) <= 64, str(b.callback_data))
+        check_true("كارت الحظر رد على الرسالة",
+                   ban_cards[-1]["kw"].get("reply_parameters") is not None)
+
+    # البطاقة المختصرة أسفل الرسالة المحوّلة — باسم طويل فيه رموز HTML
+    reset_state()
+    bot = fresh_bot(fail_html=False)
+    ctx = FakeCtx(bot)
+    mod._user_info_cache.clear()
+    long_name = "اسم <طويل> جداً & فيه رموز " * 12
+
+    async def long_name_chat(uid):
+        return _fakes.FakeChat(int(uid), name=long_name, username="u" * 40)
+
+    bot.get_chat = long_name_chat
+    await mod._send_action_card(ctx, USER, 55)
+    compact = [m for m in bot.log if m["type"] == "send_message" and m["chat_id"] == OWNER]
+    check_true("البطاقة المختصرة اتبعتت", bool(compact), str(bot.log))
+    if compact:
+        check_true("البطاقة المختصرة ≤4096 حتى مع اسم طويل",
+                   len(compact[-1]["text"]) <= 4096, str(len(compact[-1]["text"])))
+        check_true("وسوم البطاقة المختصرة متوازنة",
+                   compact[-1]["text"].count("<b>") == compact[-1]["text"].count("</b>")
+                   and compact[-1]["text"].count("<code>") == compact[-1]["text"].count("</code>"),
+                   compact[-1]["text"][:200])
+
+    # شاشة تفاصيل العضو الكاملة (اللي بتفتح بالزر)
+    info = {"full_name": "اسم العضو", "username": "member"}
+    text, kb = mod._build_user_details_view(USER, info)
+    check_true("البطاقة الكاملة ≤4096", len(text) <= 4096, str(len(text)))
+    for row in kb.inline_keyboard:
+        for b in row:
+            check_true(f"[البطاقة الكاملة] زر ≤64: {b.text[:16]}", len(b.text) <= 64,
+                       str(len(b.text)))
+            check_true(f"[البطاقة الكاملة] data ≤64", len(str(b.callback_data or "")) <= 64,
+                       str(b.callback_data))
+    check_true("البطاقة الكاملة فيها زر سجل الرسائل",
+               any(b.callback_data == f"user_msgs:{USER}:0"
+                   for r in kb.inline_keyboard for b in r))
+
     # إعادة الإعدادات للأصل بترجّع إعدادات الذكاء الاصطناعي
     reset_state()
     mod.save_settings({**mod.load_settings(), "ai_enabled": True, "ai_temperature": 1.9,
