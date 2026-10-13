@@ -6567,23 +6567,8 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                  reply_to=query.message.message_id)
         return ConversationHandler.END
 
-    if data.startswith("do_ban:") or data.startswith("do_unban:"):
-        action, uid_s = data.split(":")
-        uid = int(uid_s)
-        if action == "do_ban":
-            await _apply_ban(ctx, uid, reason="لم يتم تحديد سبب")
-            await query.answer("✅ تم الحظر", show_alert=False)
-        else:
-            await _apply_unban(ctx, uid)
-            await query.answer("✅ تم فك الحظر", show_alert=False)
-        # حدّث نفس الرسالة بتفاصيل المستخدم المحدّثة
-        try:
-            info = await _fetch_user_info(ctx, uid)
-            text, kb = _build_user_details_view(uid, info)
-            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
-        except TelegramError:
-            pass
-        return ConversationHandler.END
+    # ملاحظة: do_ban: و do_unban: بيتعالجوا فوق في نفس الدالة
+    # (do_ban: بيفتح جلسة السبب الاختياري، وdo_unban: بيفك الحظر ويحدّث البطاقة)
 
     if data == "noop":
         return ConversationHandler.END
