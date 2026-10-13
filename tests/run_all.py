@@ -11,7 +11,8 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SUITES = ["test_format.py", "test_core.py", "test_ui.py", "test_batch2.py"]
+SUITES = ["test_format.py", "test_core.py", "test_ui.py", "test_batch2.py",
+          "test_batch3.py"]
 
 
 def main() -> int:

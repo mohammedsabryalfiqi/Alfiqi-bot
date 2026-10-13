@@ -237,6 +237,10 @@ class FakeBot:
     async def send_document(self, chat_id, **kw):
         return self._rec("send_document", chat_id, "[doc]")
 
+    async def send_chat_action(self, chat_id, action, **kw):
+        self.log.append({"type": "chat_action", "chat_id": chat_id, "action": str(action)})
+        return True
+
     async def set_my_commands(self, commands, scope=None, **kw):
         # نطاق المالك (شات المالك) بيتسجل لوحده عشان نفرّق القائمتين في الاختبار
         if scope is not None:
