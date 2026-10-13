@@ -87,6 +87,24 @@ scan("الأوامر العربية", *mod.arabic_cmd_menu_view())
 scan("الإنذارات", *mod.warn_menu_view())
 scan("كيبورد رسالة البدء", "رسالة", mod.welcome_keyboard())
 
+# ══ شاشات الدفعة 3: الذكاء الاصطناعي، سجل الرسائل، بطاقة العضو ══
+scan("الذكاء الاصطناعي", *mod.ai_reply_menu_view())
+scan("الذكاء الاصطناعي — متقدم", *mod.ai_advanced_menu_view())
+
+_msgs_uid = 777000111
+for _n in range(20):
+    mod.record_message(_msgs_uid, "user", 40000 + _n, "incoming", preview=f"معاينة رسالة {_n}")
+    mod.record_message(_msgs_uid, "owner", 41000 + _n, "forward", preview=f"معاينة رسالة {_n}")
+mod.record_message(_msgs_uid, "user", 42000, "action_card")          # نوع بدون نص
+mod.record_message(_msgs_uid, "user", 42001, "welcome")              # رسالة قديمة بدون معاينة
+for _page in range(0, 4):
+    scan(f"سجل رسائل العضو ص{_page}", *mod.user_messages_view(_msgs_uid, _page))
+scan("سجل رسائل عضو فاضي", *mod.user_messages_view(999888777, 0))
+scan("بطاقة العضو الكاملة",
+     *mod._build_user_details_view(_msgs_uid, {"full_name": "اسم العضو", "username": "member"}))
+scan("كيبورد إجراءات العضو", "إجراءات", mod._user_action_keyboard(_msgs_uid))
+scan("كيبورد إجراءات من رسالة", "إجراءات", mod._user_action_keyboard(_msgs_uid, 42))
+
 # صفحات المحرر كلها
 mod.save_button_rows([[{"text": f"زر{i}", "url": "https://t.me/x", "style": "success"}
                        for i in range(2)] for _ in range(12)])
@@ -105,7 +123,8 @@ for handler in app.handlers.get(0, []):
         registered_states |= set(handler.states.keys())
 for state_name in ("AWAIT_BUTTON_TEXT", "AWAIT_BUTTON_URL", "AWAIT_BUTTON_EMOJI",
                    "AWAIT_NEW_BUTTON", "AWAIT_WELCOME_MEDIA", "AWAIT_WELCOME_CAPTION",
-                   "AWAIT_PREVIEW_URL", "AWAIT_WARN_TEXT", "AWAIT_RECEIPT_EMOJI"):
+                   "AWAIT_PREVIEW_URL", "AWAIT_WARN_TEXT", "AWAIT_RECEIPT_EMOJI",
+                   "AWAIT_AI_SETTING"):
     value = getattr(mod, state_name)
     check_true(f"الحالة {state_name} مسجّلة", value in registered_states,
                f"{value} not in {sorted(registered_states)}")
