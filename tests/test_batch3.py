@@ -398,6 +398,59 @@ async def main():
     check_true("التخطي بيوصل لكارت المدد", any("اختر مدة الحظر" in (t or "") for t in texts),
                str([t[:40] for t in texts]))
 
+    # جلسة سبب الحظر (مسار الزر): السبب بقى اختيارياً — الرسالة الفاضية ما تلحّش
+    reset_state()
+    bot = fresh_bot()
+    ctx = FakeCtx(bot)
+    ctx.user_data["ban_reason_target"] = USER
+    result = await mod.recv_ban_reason(make_update(owner_msg("سبب مكتوب")), ctx)
+    texts = [m["text"] for m in bot.log if m["chat_id"] == OWNER]
+    check_true("السبب المكتوب بيوصل لكارت المدد",
+               any("اختر مدة الحظر" in (t or "") for t in texts), str([x[:40] for x in texts]))
+    check_true("السبب ظاهر في الكارت", any("سبب مكتوب" in (t or "") for t in texts),
+               str([x[:60] for x in texts]))
+    check_true("الجلسة بتقفل بعد السبب", result == mod.ConversationHandler.END, str(result))
+
+    reset_state()
+    bot = fresh_bot()
+    ctx = FakeCtx(bot)
+    ctx.user_data["ban_reason_target"] = USER
+    result = await mod.recv_ban_reason(make_update(owner_msg("   ")), ctx)
+    texts = [m["text"] for m in bot.log if m["chat_id"] == OWNER]
+    check_true("رسالة فاضية → كارت المدد على طول (من غير لحّ)",
+               any("اختر مدة الحظر" in (t or "") for t in texts), str([x[:60] for x in texts]))
+    check_true("السبب الافتراضي بيتحط", any("لم يتم تحديد سبب" in (t or "") for t in texts),
+               str([x[:80] for x in texts]))
+    check_true("ما فيش رسالة «اكتب سبباً واضحاً»",
+               not any("اكتب سبباً واضحاً" in (t or "") for t in texts),
+               str([x[:60] for x in texts]))
+
+    # الجلسة انتهت (مفيش target) → تنبيه واضح
+    reset_state()
+    bot = fresh_bot()
+    ctx = FakeCtx(bot)
+    result = await mod.recv_ban_reason(make_update(owner_msg("سبب")), ctx)
+    check_true("جلسة منتهية = تنبيه وقفل",
+               any("انتهت جلسة الحظر" in (m["text"] or "") for m in bot.log),
+               str([m["text"][:40] for m in bot.log]))
+    check_true("الجلسة المنتهية بتقفل", result == mod.ConversationHandler.END)
+
+    # المسار الاحتياطي جوه handle_owner_reply (لو حالة المحادثة اتفقدت)
+    reset_state()
+    bot = fresh_bot()
+    ctx = FakeCtx(bot)
+    ctx.user_data["ban_reason_target"] = USER
+    fallback_msg = owner_msg("   ")
+    await mod.handle_owner_reply(make_update(fallback_msg), ctx)
+    texts = [m["text"] for m in bot.log if m["chat_id"] == OWNER]
+    check_true("المسار الاحتياطي بيكمّل لكارت المدد برسالة فاضية",
+               any("اختر مدة الحظر" in (t or "") for t in texts), str([x[:60] for x in texts]))
+    check_true("المسار الاحتياطي ما بيلحّش على السبب",
+               not any("اكتب سبباً واضحاً" in (t or "") for t in texts),
+               str([x[:60] for x in texts]))
+    check_true("المسار الاحتياطي بيقفل الجلسة",
+               ctx.user_data.get("ban_reason_target") is None, str(ctx.user_data))
+
     # الحظر التلقائي من الإنذارات لسه دائم
     reset_state()
     bot = fresh_bot()

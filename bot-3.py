@@ -5549,7 +5549,9 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ══ جلسة سبب الحظر المفتوحة بكلمة «حظر» العربية (بدون سبب) ══════
+    # ══ جلسة سبب الحظر (مسار احتياطي لو حالة المحادثة اتفقدت) ══════
+    # الجلسة دي بتتفتح من زر «🚫 حظر» في البطاقة — كلمة «حظر» العربية
+    # بقى حظرها فوري دائم من غير ما تفتح جلسة أصلاً.
     pending_ban_uid = ctx.user_data.get("ban_reason_target")
     if (
         pending_ban_uid
@@ -5559,13 +5561,12 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ):
         reason = msg.text.strip()
         ctx.user_data.pop("ban_reason_target", None)
-        if reason:
-            await _send_ban_confirmation_with_reason(
-                ctx, OWNER_ID, int(pending_ban_uid), reason=reason,
-                reply_to=msg.message_id,
-            )
-        else:
-            await msg.reply_text("⚠️ اكتب سبباً واضحاً للحظر، أو أرسل /cancel للإلغاء.")
+        # السبب اختياري — الرسالة الفاضية تكمّل لكارت المدد من غيره
+        await _send_ban_confirmation_with_reason(
+            ctx, OWNER_ID, int(pending_ban_uid),
+            reason=reason or "لم يتم تحديد سبب",
+            reply_to=msg.message_id,
+        )
         return
 
     # ══ 🇸🇦 الأوامر العربية: كلمة واحدة بالرد على رسالة العضو = أمر ══
@@ -7534,12 +7535,10 @@ async def recv_ban_reason(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not uid:
         await update.message.reply_text("⚠️ انتهت جلسة الحظر. أعد الضغط على زر الحظر.")
         return ConversationHandler.END
-    if not reason:
-        await update.message.reply_text("⚠️ اكتب سبباً واضحاً للحظر أو أرسل /cancel.")
-        ctx.user_data["ban_reason_target"] = uid
-        return AWAIT_BAN_REASON
+    # السبب اختياري — لو الرسالة فاضية نكمّل لكارت المدد من غيره بدل اللحّ على المالك.
     await _send_ban_confirmation_with_reason(
-        ctx, update.effective_chat.id, int(uid), reason=reason
+        ctx, update.effective_chat.id, int(uid),
+        reason=reason or "لم يتم تحديد سبب",
     )
     return ConversationHandler.END
 
