@@ -197,6 +197,36 @@ async def main():
     check_true("آخر صفحة فيها الأقدم", "رسالة رقم 0" in text2, text2[:300])
     check_true("صفحة خارج النطاق ما تكسرش", bool(mod.user_messages_view(USER, 99)[0]))
 
+    # أنواع الرسائل اللي بطبيعتها بدون نص ما بتتحسبش «رسالة قديمة»
+    reset_state()
+    mod.record_message(USER, "owner", 150, "action_card")          # بطاقة إجراءات
+    mod.record_message(USER, "user", 151, "incoming")              # رسالة قديمة بدون معاينة
+    mod.record_message(USER, "user", 152, "ai_fallback", preview="آسف، هيرد عليك المسؤول")
+    text, kb = mod.user_messages_view(USER, 0)
+    check_true("البطاقة بتتوصف كإجراء", "إجراء/بطاقة بدون نص" in text, text[:400])
+    check_true("الرسالة القديمة بتتوصف كقديمة", "قبل تفعيل المعاينة" in text, text[:400])
+    check_true("نوع رسالة الاعتذار متسمّى بالعربي",
+               "رسالة اعتذار" in text, text[:500])
+    check_true("كل أنواع الرسائل المسجلة ليها اسم عربي",
+               all(kind in mod.MESSAGE_KIND_LABELS
+                   for kind in ("start", "incoming", "forward", "welcome", "away_reply",
+                                "auto_reply", "ai_reply", "ai_fallback", "owner_reply",
+                                "warn_notice", "ban_notice", "unban_notice", "broadcast",
+                                "global_pin", "action_card", "info_card", "join_notice",
+                                "snooze_reminder", "reaction_note", "reception",
+                                "ban_confirmation", "ban_expired_notice", "unwarn_notice",
+                                "warn_card", "auto_reply_card", "ai_reply_card",
+                                "forwarded_from_owner", "owner_source", "pin_service")),
+               str(set(("start", "incoming", "forward", "welcome", "away_reply",
+                        "auto_reply", "ai_reply", "ai_fallback", "owner_reply",
+                        "warn_notice", "ban_notice", "unban_notice", "broadcast",
+                        "global_pin", "action_card", "info_card", "join_notice",
+                        "snooze_reminder", "reaction_note", "reception",
+                        "ban_confirmation", "ban_expired_notice", "unwarn_notice",
+                        "warn_card", "auto_reply_card", "ai_reply_card",
+                        "forwarded_from_owner", "owner_source", "pin_service"))
+                   - set(mod.MESSAGE_KIND_LABELS)))
+
     # شاشة فاضية
     reset_state()
     empty_text, empty_kb = mod.user_messages_view(USER, 0)

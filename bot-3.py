@@ -644,6 +644,7 @@ MESSAGE_KIND_LABELS = {
     "auto_reply_card": "🤖 إشعار الرد التلقائي",
     "ai_reply": "🧠 رد الذكاء الاصطناعي",
     "ai_reply_card": "🧠 إشعار رد الذكاء الاصطناعي",
+    "ai_fallback": "⚠️ رسالة اعتذار (فشل الرد الآلي)",
     "owner_reply": "👮 رد المالك",
     "owner_source": "👮 رسالة المالك الأصلية",
     "warn_notice": "⚠️ إنذار",
@@ -665,6 +666,12 @@ MESSAGE_KIND_LABELS = {
 }
 # الأنواع اللي كاتبها العضو نفسه (باقي الأنواع في شات العضو = من البوت/المالك)
 USER_AUTHORED_KINDS = {"start", "incoming"}
+# أنواع بطبيعتها بدون نص (بطاقات وأزرار وتفاعلات) — ما تستناش معاينة أبداً
+PREVIEWLESS_KINDS = {
+    "action_card", "info_card", "reaction_note", "reception", "pin_service",
+    "snooze_reminder", "warn_card", "ban_confirmation", "auto_reply_card",
+    "ai_reply_card", "join_notice", "global_pin", "owner_source",
+}
 USER_MSGS_PER_PAGE = 8          # عدد الرسائل المعروضة في كل صفحة
 
 
@@ -1438,8 +1445,10 @@ def user_messages_view(uid: int, page: int = 0):
         )
         if preview:
             lines.append(f"    <code>{html.escape(preview[:140])}</code>")
+        elif str(item.get("kind") or "") in PREVIEWLESS_KINDS:
+            lines.append("    <i>(إجراء/بطاقة بدون نص)</i>")
         else:
-            lines.append("    <i>(رسالة مسجّلة قبل تفعيل المعاينة — بدون نص)</i>")
+            lines.append("    <i>(رسالة قديمة مسجّلة قبل تفعيل المعاينة — بدون نص)</i>")
     if not items:
         lines.append("لا توجد رسائل مسجّلة لهذا العضو حتى الآن.")
 
