@@ -4988,7 +4988,8 @@ _AR_COMBINED_INDEX: list[tuple[str, str]] = sorted(
 )
 
 ARABIC_COMMAND_HELP = (
-    "🚫 <b>حظر</b> — <code>حظر</code> أو <code>حظر السبب هنا</code>\n"
+    "🚫 <b>حظر فوري دائم</b> — <code>حظر</code> أو <code>حظر السبب هنا</code>\n"
+    "    (بدون سبب وبدون مدة — للحظر المؤقت بمدة: من بطاقة العضو ← 🚫 حظر)\n"
     "✅ <b>فك حظر</b> — <code>فك حظر</code>\n"
     "⚠️ <b>إنذار</b> — <code>إنذار</code> أو <code>إنذار السبب هنا</code>\n"
     "↩️ <b>إلغاء إنذار</b> — <code>الغاء الانذار</code>\n"
